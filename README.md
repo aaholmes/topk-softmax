@@ -11,6 +11,12 @@ has a temperature τ: at large τ it equals the ordinary softmax, and as τ → 
 over only the k largest scores. It is differentiable at every τ > 0, so τ can start large and be
 lowered during training. The planned package name is `softk`.
 
+<img src="docs/softmax_to_topk.png" width="650" alt="Output probabilities as the temperature decreases">
+
+The figure shows the output for one input of 8 evenly spaced scores, from 2.0 down to −1.5, with
+k = 3. Each curve is the probability of one entry. As τ decreases, the 5 entries outside the top 3
+lose their probability, and the top 3 end at the values a softmax over those 3 alone would give.
+
 ## Definition
 
 Each score z_i gets a weight m_i between 0 and 1, called the mask, and the output p is the softmax
@@ -70,17 +76,18 @@ This is a prototype, not yet an installable package.
   lower bound on τ relative to the spread of the scores, and input validation.
 - There is one known numerical limit. In single precision, when several scores tie exactly at the
   k-th position and τ is below about 1e-3, the mask sum misses k by more than the 1e-5 target.
-- `demo.py` plots the output as a function of τ and k, and runs a small training example. It
-  currently fails on import because it expects the prototype under a different module name.
+- `demo.py` draws the figure above, plots the output for several inputs and values of k, and runs
+  a small training example on synthetic data.
 
 There is no evidence yet that the operator improves a real model; it has only been checked for
 numerical correctness.
 
-## Running the prototype's checks
+## Running the prototype
 
 The environment is managed with the Python package manager `uv`.
 
 ```sh
 uv sync
-uv run python softk_prototype.py
+uv run python softk_prototype.py   # prints gradient checks and both limits
+uv run python demo.py               # writes sweep.png, flow.png and train.png
 ```

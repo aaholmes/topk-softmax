@@ -2,6 +2,7 @@
 
 Figure 1: rows = input vectors, cols = k; each line is one output entry p_i vs tau (log axis).
 Figure 2: toy training run with tau annealing: KL to a k-sparse target and mass outside top-k vs step.
+Figure 3: one input and one k, with tau decreasing left to right (the figure in the README).
 """
 import argparse
 import math
@@ -9,7 +10,7 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from softk_proto import soft_topk_softmax
+from softk_prototype import soft_topk_softmax
 
 INPUTS = {
     "spread":    torch.tensor([2.0, 1.5, 1.0, 0.5, 0.0, -0.5, -1.0, -1.5]),
@@ -43,6 +44,29 @@ def sweep(out):
     axes[0, -1].legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False)
     fig.tight_layout()
     fig.savefig(out, dpi=130, bbox_inches="tight")
+
+
+def flow(out, k=3):
+    z = INPUTS["spread"].double()
+    n = z.numel()
+    taus = torch.logspace(2, -3, 300, dtype=torch.float64)
+    P = torch.stack([soft_topk_softmax(z, k, float(t)) for t in taus])
+    fig, ax = plt.subplots(figsize=(6.5, 3.6))
+    for i in range(n):
+        top = i < k  # INPUTS["spread"] is sorted in decreasing order
+        ax.plot(taus, P[:, i], color="tab:blue" if top else "0.6", lw=1.8,
+                label={0: f"{k} largest scores", k: f"other {n - k} scores"}.get(i))
+    ax.set_xscale("log")
+    ax.invert_xaxis()
+    ax.set_xlim(taus[0], taus[-1])
+    ax.set_xlabel("temperature τ (decreasing)")
+    ax.set_ylabel(f"output probability (n = {n} scores)")
+    ax.text(0, 1.03, "large τ: softmax", transform=ax.transAxes, ha="left", va="bottom")
+    ax.text(1, 1.03, f"τ → 0: softmax over the {k} largest scores", transform=ax.transAxes, ha="right", va="bottom")
+    ax.legend(frameon=False, loc="lower right", bbox_to_anchor=(1.0, 0.06))
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out, dpi=200)
 
 
 def train(out, n=64, k=4, steps=3000, tau0=10.0, tau_end=0.01, seed=0):
@@ -84,6 +108,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--sweep", default="sweep.png")
     ap.add_argument("--train", default="train.png")
+    ap.add_argument("--flow", default="flow.png")
     a = ap.parse_args()
     sweep(a.sweep)
+    flow(a.flow)
     train(a.train)
