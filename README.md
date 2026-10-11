@@ -44,7 +44,8 @@ the mask.
 Two details make this cheap to compute:
 
 - The sum of the mask decreases monotonically in t, so t is found by bisection, followed by two
-  Newton steps.
+  Newton steps. Of the root-finders compared in `benchmarks/solvers.py`, none needed fewer
+  iterations in the worst case.
 - The backward pass does not differentiate through the bisection. It uses the implicit function
   theorem on the constraint Σm = k, which gives a closed-form gradient costing two sums per row.
 
@@ -82,8 +83,8 @@ layer.mode = "hard"            # exact zeros for inference
 
 ## Status
 
-The operator and the training tools are implemented and tested on CPU. The package is not yet
-released.
+The operator, the training tools and GPU kernels are implemented and tested. The package is not
+yet released.
 
 - `soft_topk_softmax` and `soft_topk_mask` work along any dimension, in 16-, 32- and 64-bit
   floating point, and compile with `torch.compile` without graph breaks.
@@ -94,10 +95,31 @@ released.
   resuming.
 - `softk.stats` has three quantities to log during training: the probability outside the top k, the
   effective support exp(entropy), and how much the selected set changed between two checkpoints.
-- The suite of 431 tests passes. It covers finite-difference gradient checks, agreement with an
-  independent double-precision reference, the softmax limit at large τ, the top-k limit at small τ,
-  inputs with exact ties at the k-th position, and the scheduler's curves and resume behavior.
-- Not implemented yet: fused GPU kernels. Nothing has been run on a GPU.
+- On a CUDA GPU, `backend="triton"` runs fused kernels written in Triton, a Python-embedded
+  language for GPU kernels. The default `backend="auto"` selects them when they are available.
+- The suite of 691 tests passes on one machine with a CUDA GPU. It covers finite-difference
+  gradient checks, agreement with an independent double-precision reference, the softmax limit at
+  large τ, the top-k limit at small τ, inputs with exact ties at the k-th position, the scheduler's
+  curves and resume behavior, agreement between CPU and GPU, and agreement between the kernels and
+  the PyTorch code.
+
+### Speed
+
+Times are for one forward pass over 4096 rows of 16384 scores in 32-bit floats on an NVIDIA RTX
+5060 Ti, as the median of 20 calls. Raw timings for other sizes, the backward pass and CPU are in
+`benchmarks/results/m3.json`.
+
+| Implementation | τ = 1 | τ = 0.01 |
+| --- | --- | --- |
+| `torch.softmax`, for scale | 1.4 ms | 1.4 ms |
+| PyTorch code, uncompiled | 130.6 ms | 130.7 ms |
+| PyTorch code under `torch.compile` | 4.3 ms | 4.3 ms |
+| Triton kernels | 2.2 ms | 2.9 ms |
+
+The kernels stop iterating on each row once it has converged, so their time depends on the data
+and on τ: smaller τ needs more iterations. For rows of 64 scores the compiled PyTorch code is
+faster than the kernels, and `backend="auto"` uses it there under `torch.compile`. These timings
+come from one GPU model and Gaussian random scores.
 
 One test trains a small network on a synthetic task whose targets are supported on the 4 largest
 of 64 teacher scores. On each of 10 random seeds, lowering τ from 10 to 0.3 during training ended
@@ -113,6 +135,7 @@ The environment is managed with the Python package manager `uv`.
 ```sh
 uv sync                  # installs softk in editable mode with its test dependencies
 uv run pytest -m "not slow"                                     # about 10 seconds on CPU
-uv run pytest                                                   # about 75 seconds; adds compilation and training tests
+uv run pytest                                                   # about 80 seconds; adds compilation, training and timing tests
+uv run python benchmarks/bench.py --report benchmarks/results/m3.json   # prints the saved timings
 uv run python -m softk.demo --k 1 2 4 --input tie --out figs    # plots the output as a function of τ
 ```

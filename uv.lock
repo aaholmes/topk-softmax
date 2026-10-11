@@ -1689,6 +1689,9 @@ demo = [
     { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "matplotlib", version = "3.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
+triton = [
+    { name = "triton" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1702,8 +1705,9 @@ dev = [
 requires-dist = [
     { name = "matplotlib", marker = "extra == 'demo'", specifier = ">=3.8" },
     { name = "torch", specifier = ">=2.4" },
+    { name = "triton", marker = "extra == 'triton'", specifier = ">=3.0" },
 ]
-provides-extras = ["demo"]
+provides-extras = ["demo", "triton"]
 
 [package.metadata.requires-dev]
 dev = [

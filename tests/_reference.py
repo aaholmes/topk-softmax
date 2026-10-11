@@ -110,5 +110,6 @@ def hard_cases(dtype=torch.float64):
 
 
 def mask_sum_tol(k, dtype):
-    """Allowed |sum(m) - k|. A 32-bit sum of terms that add up to k is accurate to about k * 1e-7."""
-    return 1e-10 if dtype == torch.float64 else max(1e-5, 2e-7 * k)
+    """Allowed |sum(m) - k|. 32-bit floats near k are spaced k * 1.2e-7 apart, and no solver gets
+    the residual below a few of those spacings, so the tolerance is about 8 of them."""
+    return 1e-10 if dtype == torch.float64 else max(1e-5, 1e-6 * k)

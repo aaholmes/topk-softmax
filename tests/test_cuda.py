@@ -3,7 +3,7 @@ import pytest
 import torch
 
 import softk
-from _reference import assert_close, randn, ref_hard, ref_soft, separated
+from _reference import assert_close, mask_sum_tol, randn, ref_hard, ref_soft, separated
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")]
 
@@ -44,8 +44,7 @@ def test_mask_matches_cpu_and_sums_to_k(dtype, n, k, tau):
     m = softk.soft_topk_mask(z.cuda(), k, tau)
     assert m.device.type == "cuda"
     assert_close(m.cpu(), softk.soft_topk_mask(z, k, tau), 10 * TOL[dtype])
-    sum_tol = 1e-5 if dtype == torch.float32 else 1e-10
-    assert_close(m.sum(-1).cpu(), torch.full((6,), float(k), dtype=torch.float64), sum_tol)
+    assert_close(m.sum(-1).cpu(), torch.full((6,), float(k), dtype=torch.float64), mask_sum_tol(k, dtype))
 
 
 @pytest.mark.parametrize("dtype,atol", [(torch.float32, 1e-5), (torch.float64, 1e-11)])
