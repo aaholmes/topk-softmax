@@ -29,6 +29,24 @@ def sums(z_ptr, base, n, center, t, shift, tau, BLOCK: tl.constexpr, FLAT: tl.co
 
 
 @triton.jit
+def bit_midpoint(below, above):
+    """A float halfway between two floats in the order of their bit patterns.
+
+    Mapping the bit pattern to an integer that increases with the float makes every float one
+    step, so halving that distance reaches any score within 32 halvings, however the scores are
+    spread. The midpoint of the values can need one pass per score when they span many orders of
+    magnitude.
+    """
+    lo = below.to(tl.int32, bitcast=True)
+    hi = above.to(tl.int32, bitcast=True)
+    lo = tl.where(lo < 0, lo ^ 0x7FFFFFFF, lo).to(tl.int64)
+    hi = tl.where(hi < 0, hi ^ 0x7FFFFFFF, hi).to(tl.int64)
+    mid = (lo + (hi - lo) // 2).to(tl.int32)
+    mid = tl.where(mid < 0, mid ^ 0x7FFFFFFF, mid)
+    return mid.to(tl.float32, bitcast=True)
+
+
+@triton.jit
 def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, kf, n, max_iters,
                    BLOCK: tl.constexpr, WANT_MASK: tl.constexpr, TAU_IS_TENSOR: tl.constexpr,
                    MAX_POLISH: tl.constexpr, WIDTH: tl.constexpr, FLOOR: tl.constexpr,
@@ -67,10 +85,12 @@ def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, kf,
         i = tl.where(below < above, row * 0, MAX_SELECT)
         while i < MAX_SELECT:
             # Trial value: on even passes, where a straight line through the two counts crosses
-            # kf; on odd passes the midpoint, which bounds the number of passes.
+            # kf; on odd passes the midpoint. From pass 24 on, the odd passes take the midpoint
+            # of the bit patterns, which bounds the passes left at 2 * 33 for any scores.
             frac = (count_below.to(tl.float32) - kf + 0.5) / (count_below - count_above).to(tl.float32)
             frac = tl.where(i % 2 == 0, frac, 0.5)
             mid = below + frac * (above - below)
+            mid = tl.where((i % 2 == 1) & (i >= 24), bit_midpoint(below, above), mid)
             mid = tl.where((mid >= above) | (mid < below), below, mid)
             count = row * 0
             next_up = float("inf")

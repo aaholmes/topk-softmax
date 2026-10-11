@@ -395,3 +395,31 @@ def test_false_triton_hard_cases():
         m = plain_mask(z, k, tau, backend="triton")
         assert (m.double().sum(-1) - k).abs().max().item() <= mask_sum_tol(k, torch.float32), name
         assert torch.isfinite(_plain_grad(z, k, tau, "triton")).all(), name
+
+
+# ---- scores spread over many orders of magnitude ----
+
+def _wide_cases():
+    g = torch.Generator().manual_seed(0)
+    z = torch.randn(4, 16384, generator=g)
+    extremes = z.clone()
+    extremes[:, 0], extremes[:, 1] = -3e38, 3e38
+    return [("exp(18 z)", torch.exp(18 * z)), ("exp(5 z)", torch.exp(5 * z)), ("-exp(18 z)", -torch.exp(18 * z)),
+            ("powers of two", (2.0 ** -torch.arange(140.0))[None]), ("z cubed", z ** 3),
+            ("half at -1e9", torch.where(torch.rand(4, 16384, generator=g) < 0.5, torch.tensor(-1e9), z)),
+            ("offset 1e6", z + 1e6), ("near the largest float", extremes),
+            ("tiny values", 1e-30 * torch.exp(10 * z)), ("signed wide", z * torch.exp(10 * z.roll(1, -1)))]
+
+
+@on_cuda
+def test_triton_finds_the_kth_score_for_wide_ranges():
+    from topk_softmax import _triton
+
+    assert _triton.available()
+    for name, z in _wide_cases():
+        n = z.shape[-1]
+        assert torch.isfinite(z).all(), name
+        for k in sorted({1, 8, 70, n // 8, n // 2, n - 1}):
+            _, state = _triton._ops[0](z.cuda(), None, 1.0, float(k), k, 20, False)
+            want = z.topk(k, -1).values[:, -1]
+            assert torch.equal(state[:, 0].cpu(), want), f"{name}, k = {k}"

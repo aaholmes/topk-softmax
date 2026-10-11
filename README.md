@@ -112,7 +112,7 @@ yet released.
 - On a CUDA GPU, `backend="triton"` runs fused kernels written in Triton, a Python-embedded
   language for GPU kernels. The default `backend="auto"` selects them when they are available.
 - `flat_top=False` selects the faster variant without the clamp, as described above.
-- The suite of 840 tests passes on one machine with a CUDA GPU. It covers finite-difference
+- The suite of 841 tests passes on one machine with a CUDA GPU. It covers finite-difference
   gradient checks, agreement with an independent double-precision reference, the softmax limit at
   large τ, the top-k limit at small τ, inputs with exact ties at the k-th position, the scheduler's
   curves and resume behavior, agreement between CPU and GPU, and agreement between the kernels and

@@ -24,7 +24,7 @@ def _backward_thread_groups(n):
 
 
 _MAX_POLISH = 6       # Newton steps after the bisection; most rows need 2
-_MAX_SELECT = 64      # passes allowed for finding the k-th largest score (flat_top)
+_MAX_SELECT = 96      # passes allowed for finding the k-th largest score; 24 + 2 * 33 always suffice
 _BRACKET_WIDTH = 0.25  # bisection stops once the bracket is narrower than this many tau
 _TAU_FLOOR = 1e-4     # as in functional.py, in units of the row standard deviation
 
