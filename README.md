@@ -120,39 +120,33 @@ yet released.
 
 ### Speed
 
-Times are for one forward pass over 4096 rows of 16384 scores in 32-bit floats on an NVIDIA RTX
-5060 Ti, as the median of 20 calls. Raw timings for other sizes, the backward pass and CPU are in
-`benchmarks/results/flat_top.json`, and in `benchmarks/results/m3.json` for `flat_top=False`.
-
-| Implementation | τ = 1 | τ = 0.01 |
-| --- | --- | --- |
-| `torch.softmax`, for scale | 1.4 ms | 1.4 ms |
-| PyTorch code, uncompiled | 136.6 ms | 136.6 ms |
-| PyTorch code under `torch.compile` | 9.2 ms | 9.2 ms |
-| Triton kernels | 3.8 ms | 4.8 ms |
-| Triton kernels, `flat_top=False` | 2.2 ms | 2.9 ms |
-
-The kernels stop iterating on each row once it has converged, so their time depends on the data
-and on τ: smaller τ needs more iterations. They also find the k-th largest score themselves, where
-the PyTorch code calls `torch.topk`. For rows of 64 scores the kernels are no faster than the
-compiled PyTorch code over a forward and backward pass, and `backend="auto"` uses the compiled
-code there under `torch.compile`. These timings come from one GPU model and Gaussian random scores.
-
-Timing the kernels' two passes separately for that input at τ = 1
-(`uv run python benchmarks/bench.py --passes`):
+Times are for 4096 rows of 16384 scores in 32-bit floats at τ = 1 on an NVIDIA RTX 5060 Ti, as
+the median of 20 calls (`uv run python benchmarks/bench.py --passes`). The backward time is that of
+the operator's gradient alone, without a loss.
 
 | Operation | Forward | Backward |
 | --- | --- | --- |
+| `soft_topk_softmax` | 3.8 ms | 2.9 ms |
+| `soft_topk_softmax`, `flat_top=False` | 2.2 ms | 2.8 ms |
 | `torch.softmax` | 1.4 ms | 4.3 ms |
-| Triton kernels | 3.8 ms | 2.9 ms |
-| Triton kernels, `flat_top=False` | 2.2 ms | 2.8 ms |
 
-The backward pass is faster than that of `torch.softmax`, because one fused kernel computes the
-whole gradient. Of the 3.8 ms forward, about 1.6 ms goes to finding the k-th largest score (the
-difference between the last two rows) and about 1.4 ms is the cost of reading and writing the data
-once, which is what `torch.softmax` takes. For shorter rows the forward pass is further from
-`torch.softmax`: with 1024 scores per row it takes 0.24 ms where `torch.softmax` takes 0.025 ms,
-and the backward pass takes 0.21 ms where that of `torch.softmax` takes 0.23 ms.
+These are the times of the Triton kernels, which `backend="auto"` selects on a CUDA GPU. The
+backward pass is faster than that of `torch.softmax`, because one fused kernel computes the whole
+gradient. Of the 3.8 ms forward, about 1.6 ms goes to finding the k-th largest score (the
+difference between the first two rows) and about 1.4 ms is the cost of reading and writing the data
+once, which is what `torch.softmax` takes.
+
+- The kernels stop iterating on each row once it has converged, so the forward time depends on the
+  data and on τ: at τ = 0.01 it is 4.8 ms, or 2.9 ms with `flat_top=False`.
+- For shorter rows the forward pass is further from `torch.softmax`: with 1024 scores per row it
+  takes 0.24 ms where `torch.softmax` takes 0.025 ms, and the backward pass takes 0.21 ms where
+  that of `torch.softmax` takes 0.23 ms.
+- Without the kernels, the plain PyTorch code takes 9.2 ms forward under `torch.compile` and 137 ms
+  uncompiled. For rows of 64 scores the compiled code is as fast as the kernels over a forward and
+  backward pass, and `backend="auto"` uses it there under `torch.compile`.
+- These timings come from one GPU model and Gaussian random scores. Raw timings for other sizes
+  and CPU are in `benchmarks/results/flat_top.json`, and in `benchmarks/results/m3.json` for
+  `flat_top=False`.
 
 ### A synthetic training comparison
 
