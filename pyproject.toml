@@ -24,4 +24,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: takes more than a few seconds (deselect with -m 'not slow')"]
+markers = [
+    "slow: takes more than a few seconds (deselect with -m 'not slow')",
+    "gpu: needs a CUDA GPU; skipped when none is present",
+]

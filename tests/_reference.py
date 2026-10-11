@@ -85,3 +85,30 @@ def ref_soft(z, k, tau, dim=-1):
 
 def ref_hard(z, k, dim=-1):
     return _per_row(lambda r: _hard_row(r, k), z, dim)
+
+
+def hard_cases(dtype=torch.float64):
+    """(name, z, k, tau) inputs on which a root-finder for the threshold is most likely to fail."""
+    tie = torch.tensor([[3.0, 2.0, 1.0, 1.0, 1.0, 0.0, -1.0, -2.0]])
+    spike = torch.tensor([[40.0, 0.3, 0.2, 0.1, 0.0, -0.1, -0.2, -0.3]])
+    clusters = torch.tensor([[50.0, 50.1, 49.9, -50.0, -50.1, -49.9, -50.2]])
+    cases = []
+    cases += [(f"tie tau={tau:g}", tie, 3, tau) for tau in (1.0, 1e-3, 1e-6)]
+    cases += [(f"constant row tau={tau:g}", torch.ones(2, 16), 5, tau) for tau in (1.0, 1e-3)]
+    cases += [(f"spike k={k} tau={tau:g}", spike, k, tau) for k in (1, 3) for tau in (1.0, 0.01)]
+    cases += [(f"two clusters tau={tau:g}", clusters, 3, tau) for tau in (1.0, 1e-3)]
+    cases += [(f"n=1000 k={k} tau={tau:g}", randn(4, 1000), k, tau)
+              for k in (1, 100, 999) for tau in (1e-4, 1e-2, 1.0, 1e2, 1e4)]
+    cases += [("large scores", 1e4 * randn(4, 64), 5, 1.0)]
+    cases += [(f"real k tau={tau:g}", randn(4, 7), 2.5, tau) for tau in (0.1, 1.0)]
+    wide = randn(2, 32768)
+    outlier = wide.clone()
+    outlier[:, 0] = 1e3
+    cases += [(f"n=32768 k={k} tau={tau:g}", wide, k, tau) for k in (8, 16384) for tau in (1e-6, 1e-2)]
+    cases += [(f"n=32768 with an outlier tau={tau:g}", outlier, 8, tau) for tau in (1e-6, 1e-2)]
+    return [(name, z.to(dtype), k, tau) for name, z, k, tau in cases]
+
+
+def mask_sum_tol(k, dtype):
+    """Allowed |sum(m) - k|. A 32-bit sum of terms that add up to k is accurate to about k * 1e-7."""
+    return 1e-10 if dtype == torch.float64 else max(1e-5, 2e-7 * k)
