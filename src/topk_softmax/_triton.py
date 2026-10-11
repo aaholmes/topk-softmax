@@ -45,15 +45,19 @@ def faster_for(n):
     return n >= 128 or not torch.compiler.is_compiling()
 
 
-def run(x, k, tau, iters, want_mask):
-    """The mask (want_mask=True) or the masked softmax along the last dim of a 32-bit CUDA tensor."""
+def run(x, k, tau, iters, want_mask, mask_scores=None):
+    """The mask (want_mask=True) or the masked softmax along the last dim of a 32-bit CUDA tensor.
+
+    mask_scores, if given, are the scores the mask is computed from in place of x (flat_top).
+    """
     n = x.shape[-1]
     z = x.contiguous().view(-1, n)
+    w = None if mask_scores is None else mask_scores.contiguous().view(-1, n)
     if isinstance(tau, torch.Tensor):
         tau_tensor, tau_number = tau.detach().to(device=z.device, dtype=torch.float32), 0.0
     else:
         tau_tensor, tau_number = None, float(tau)
-    out, _ = _ops[0](z, tau_tensor, tau_number, float(k), int(iters), bool(want_mask))
+    out, _ = _ops[0](z, w, tau_tensor, tau_number, float(k), int(iters), bool(want_mask))
     return out.view(x.shape)
 
 
@@ -72,36 +76,41 @@ def _load():
         return min(largest, max(16, triton.next_power_of_2(n)))
 
     @triton_op("topk_softmax::soft_topk_forward", mutates_args={})
-    def forward_op(z: torch.Tensor, tau_tensor: torch.Tensor | None, tau_number: float, k: float,
-                   max_iters: int, want_mask: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward_op(z: torch.Tensor, w: torch.Tensor | None, tau_tensor: torch.Tensor | None, tau_number: float,
+                   k: float, max_iters: int, want_mask: bool) -> tuple[torch.Tensor, torch.Tensor]:
         rows, n = z.shape
         out = torch.empty_like(z)
         state = z.new_empty(rows, 4)  # per row: mean, threshold, floored tau, Newton shift
         wrap_triton(forward_kernel)[(rows,)](
-            z, out, state, z if tau_tensor is None else tau_tensor, tau_number, k,
+            z if w is None else w, z, out, state, z if tau_tensor is None else tau_tensor, tau_number, k,
             math.log(k / (n - k)), n, max_iters,
             WANT_MASK=want_mask, TAU_IS_TENSOR=tau_tensor is not None,
-            MAX_POLISH=_MAX_POLISH, WIDTH=_BRACKET_WIDTH, FLOOR=_TAU_FLOOR,
+            MAX_POLISH=_MAX_POLISH, WIDTH=_BRACKET_WIDTH, FLOOR=_TAU_FLOOR, FLAT=w is not None,
             BLOCK=block(n, _FORWARD_BLOCK), num_warps=_forward_thread_groups(n))
         return out, state
 
     @triton_op("topk_softmax::soft_topk_backward", mutates_args={})
-    def backward_op(z: torch.Tensor, out: torch.Tensor, state: torch.Tensor, g: torch.Tensor,
-                    want_mask: bool) -> torch.Tensor:
-        rows, n = z.shape
-        grad = torch.empty_like(z)
-        wrap_triton(backward_kernel)[(rows,)](z, out, state, g, grad, n, WANT_MASK=want_mask,
-                                              BLOCK=block(n, _BACKWARD_BLOCK), num_warps=_backward_thread_groups(n))
-        return grad
+    def backward_op(mask_scores: torch.Tensor, out: torch.Tensor, state: torch.Tensor, g: torch.Tensor,
+                    want_mask: bool, flat: bool) -> tuple[torch.Tensor, torch.Tensor]:
+        rows, n = mask_scores.shape
+        grad = torch.empty_like(mask_scores)
+        grad_mask = torch.empty_like(mask_scores) if flat else mask_scores.new_empty(0)
+        wrap_triton(backward_kernel)[(rows,)](
+            mask_scores, out, state, g, grad, grad_mask, n, WANT_MASK=want_mask, FLAT=flat,
+            BLOCK=block(n, _BACKWARD_BLOCK), num_warps=_backward_thread_groups(n))
+        return grad, grad_mask
 
     def setup_context(ctx, inputs, output):
+        z, w = inputs[0], inputs[1]
         out, state = output
-        ctx.save_for_backward(inputs[0], out, state)
-        ctx.want_mask = inputs[5]
+        ctx.save_for_backward(z if w is None else w, out, state)
+        ctx.want_mask = inputs[6]
+        ctx.flat = w is not None
 
     def backward(ctx, grad_out, grad_state):
-        z, out, state = ctx.saved_tensors
-        return backward_op(z, out, state, grad_out.contiguous(), ctx.want_mask), None, None, None, None, None
+        mask_scores, out, state = ctx.saved_tensors
+        grad, grad_mask = backward_op(mask_scores, out, state, grad_out.contiguous(), ctx.want_mask, ctx.flat)
+        return grad, (grad_mask if ctx.flat else None), None, None, None, None, None
 
     forward_op.register_autograd(backward, setup_context=setup_context)
     _ops = (forward_op, backward_op)

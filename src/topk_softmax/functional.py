@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 from . import _triton
@@ -49,12 +51,21 @@ def _log_mask(z, k, tau, iters):
     return _LogSoftTopKMask.apply(z, k, floor.clamp_min(tau), iters)
 
 
+def _mask_scores(z, k, flat_top):
+    """The scores the mask is computed from: z, or with flat_top, z clamped from above at its
+    floor(k)-th largest entry, so that the floor(k) largest entries get one mask value."""
+    kf = math.floor(k)
+    if not flat_top or kf < 1:
+        return z
+    return torch.minimum(z, z.topk(kf, -1).values[..., -1:])
+
+
 def _hard(z, k):
     idx = z.topk(int(k), -1).indices
     return torch.zeros_like(z).scatter(-1, idx, torch.softmax(z.gather(-1, idx), -1))
 
 
-def soft_topk_softmax(z, k, tau, dim=-1, mode="soft", iters=None, backend="auto"):
+def soft_topk_softmax(z, k, tau, dim=-1, mode="soft", iters=None, backend="auto", flat_top=False):
     """Softmax of z along `dim`, restricted to a soft top-k with temperature tau.
 
     With m_i = sigmoid((z_i - t)/tau) and t chosen so that sum m = k, the result is
@@ -77,12 +88,18 @@ def soft_topk_softmax(z, k, tau, dim=-1, mode="soft", iters=None, backend="auto"
                 converged. Needs the triton package. 64-bit inputs and mode="hard" still use the
                 PyTorch operations.
       "auto"    "triton" where it is available and measured to be faster, otherwise "eager".
+
+    flat_top: at intermediate tau the mask is larger for larger scores, which raises the largest
+    of the top k relative to the others beyond their softmax ratios. With flat_top=True the mask is
+    computed from scores clamped at the floor(k)-th largest, so the floor(k) largest entries share
+    one mask value and keep exactly the ratios a softmax gives them, at every tau. This needs a
+    top-k selection per row, which costs more than the operator itself on a GPU.
     """
     _validate(k, tau)
-    return _soft_topk_softmax(z, k, tau, dim, mode, iters, backend)
+    return _soft_topk_softmax(z, k, tau, dim, mode, iters, backend, flat_top)
 
 
-def _soft_topk_softmax(z, k, tau, dim, mode, iters=None, backend="auto"):
+def _soft_topk_softmax(z, k, tau, dim, mode, iters=None, backend="auto", flat_top=False):
     """soft_topk_softmax without the check on tau, so tau may be a tensor under torch.compile."""
     if mode not in _MODES:
         raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
@@ -97,27 +114,29 @@ def _soft_topk_softmax(z, k, tau, dim, mode, iters=None, backend="auto"):
     if mode == "hard":
         out = _hard(x, k)
     else:
+        w = _mask_scores(x, k, flat_top)
         if use_triton:
-            out = _triton.run(x, k, tau, _default_iters(x) if iters is None else iters, want_mask=False)
+            out = _triton.run(x, k, tau, _default_iters(x) if iters is None else iters, want_mask=False,
+                              mask_scores=None if w is x else w)
         else:
-            out = torch.softmax(x + _log_mask(x, k, tau, iters), -1)
+            out = torch.softmax(x + _log_mask(w, k, tau, iters), -1)
         if mode == "st":
             # the parenthesized term is exactly zero, so the forward value is the hard output
             out = _hard(x, k).detach() + (out - out.detach())
     return out.transpose(dim, -1).to(z.dtype)
 
 
-def soft_topk_mask(z, k, tau, dim=-1, iters=None, backend="auto"):
+def soft_topk_mask(z, k, tau, dim=-1, iters=None, backend="auto", flat_top=False):
     """The mask m alone: entries in [0, 1] that sum to k along `dim`. Needs k < n.
 
-    `backend` is as in soft_topk_softmax.
+    `backend` and `flat_top` are as in soft_topk_softmax.
     """
     _validate(k, tau)
     if k >= z.shape[dim]:
         raise ValueError(f"k must be less than the size of dim {dim} ({z.shape[dim]}), got {k}")
     x = z.float() if z.dtype in _HALF_DTYPES else z
     use_triton = _use_triton(x, backend)
-    x = x.transpose(dim, -1)
+    x = _mask_scores(x.transpose(dim, -1), k, flat_top)
     if use_triton:
         m = _triton.run(x, k, tau, _default_iters(x) if iters is None else iters, want_mask=True)
     else:

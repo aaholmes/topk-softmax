@@ -22,9 +22,12 @@ def sums(z_ptr, base, n, mean, t, shift, tau, BLOCK: tl.constexpr):
     return s, sv
 
 @triton.jit
-def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, n, max_iters,
+def forward_kernel(z_ptr, s_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, n, max_iters,
                    BLOCK: tl.constexpr, WANT_MASK: tl.constexpr, TAU_IS_TENSOR: tl.constexpr,
-                   MAX_POLISH: tl.constexpr, WIDTH: tl.constexpr, FLOOR: tl.constexpr):
+                   MAX_POLISH: tl.constexpr, WIDTH: tl.constexpr, FLOOR: tl.constexpr,
+                   FLAT: tl.constexpr):
+    # z_ptr holds the scores the mask is computed from. With FLAT these are the clamped scores, and
+    # s_ptr holds the original scores for the softmax; otherwise s_ptr is not read.
     row = tl.program_id(0)
     base = row.to(tl.int64) * n
     # scalar arguments arrive as 64-bit floats under torch.compile
@@ -39,6 +42,7 @@ def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, n, 
     total = 0.0
     z_min = float("inf")
     z_max = float("-inf")
+    s_top = float("-inf")
     for start in range(0, n, BLOCK):
         offs = start + tl.arange(0, BLOCK)
         valid = offs < n
@@ -46,9 +50,16 @@ def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, n, 
         total += tl.sum(z, axis=0)
         z_min = tl.minimum(z_min, tl.min(tl.where(valid, z, float("inf")), axis=0))
         z_max = tl.maximum(z_max, tl.max(tl.where(valid, z, float("-inf")), axis=0))
+        if FLAT:
+            sc = tl.load(s_ptr + base + offs, mask=valid, other=float("-inf"))
+            s_top = tl.maximum(s_top, tl.max(sc, axis=0))
     mean = total / n
     z_min -= mean
     z_max -= mean
+    if FLAT:
+        s_top -= mean
+    else:
+        s_top = z_max
     # tau is floored at FLOOR standard deviations. A standard deviation is at most half the range,
     # so the pass that computes it is skipped when the floor cannot apply.
     tau = tau_in
@@ -93,7 +104,7 @@ def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, n, 
     # The largest score has the largest mask value, so the largest shifted logit is known
     # without another pass, which keeps the softmax to two passes.
     u_top = (z_max - t) / tau - shift
-    y_top = z_max + tl.minimum(u_top, 0.0) - tl.log(1.0 + tl.exp(-tl.abs(u_top)))
+    y_top = s_top + tl.minimum(u_top, 0.0) - tl.log(1.0 + tl.exp(-tl.abs(u_top)))
     denom = 0.0
     if not WANT_MASK:
         for start in range(0, n, BLOCK):
@@ -101,7 +112,11 @@ def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, n, 
             valid = offs < n
             zc = tl.load(z_ptr + base + offs, mask=valid, other=0.0) - mean
             u = (zc - t) / tau - shift
-            y = zc + tl.minimum(u, 0.0) - tl.log(1.0 + tl.exp(-tl.abs(u)))
+            if FLAT:
+                sc = tl.load(s_ptr + base + offs, mask=valid, other=0.0) - mean
+            else:
+                sc = zc
+            y = sc + tl.minimum(u, 0.0) - tl.log(1.0 + tl.exp(-tl.abs(u)))
             denom += tl.sum(tl.where(valid, tl.exp(y - y_top), 0.0), axis=0)
     for start in range(0, n, BLOCK):
         offs = start + tl.arange(0, BLOCK)
@@ -111,7 +126,11 @@ def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, n, 
         if WANT_MASK:
             out = tl.sigmoid(u)
         else:
-            y = zc + tl.minimum(u, 0.0) - tl.log(1.0 + tl.exp(-tl.abs(u)))
+            if FLAT:
+                sc = tl.load(s_ptr + base + offs, mask=valid, other=0.0) - mean
+            else:
+                sc = zc
+            y = sc + tl.minimum(u, 0.0) - tl.log(1.0 + tl.exp(-tl.abs(u)))
             out = tl.exp(y - y_top) / denom
         tl.store(out_ptr + base + offs, out, mask=valid)
 
@@ -120,12 +139,16 @@ def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, n, 
     tl.store(state_ptr + row * 4 + 2, tau)
     tl.store(state_ptr + row * 4 + 3, shift)
 
+
 @triton.jit
-def backward_kernel(z_ptr, out_ptr, state_ptr, g_ptr, grad_ptr, n,
-                    BLOCK: tl.constexpr, WANT_MASK: tl.constexpr):
+def backward_kernel(z_ptr, out_ptr, state_ptr, g_ptr, grad_ptr, grad_mask_ptr, n,
+                    BLOCK: tl.constexpr, WANT_MASK: tl.constexpr, FLAT: tl.constexpr):
     # Implicit-function-theorem gradient, as in _autograd.py, fused with the softmax gradient:
     #   h = p (g - sum(p g)),  a = (1 - sigma) h,  grad = h + (a - v sum(a)/sum(v)) / tau
     # For the mask alone, h = 0 and a = v g.
+    # z_ptr holds the scores the mask was computed from. With FLAT those are the clamped scores,
+    # so the two terms are written separately: h is the gradient for the original scores, and the
+    # second term, for the clamped scores, goes to grad_mask_ptr.
     row = tl.program_id(0)
     base = row.to(tl.int64) * n
     mean = tl.load(state_ptr + row * 4)
@@ -168,5 +191,9 @@ def backward_kernel(z_ptr, out_ptr, state_ptr, g_ptr, grad_ptr, n,
             grad = (v * g - v * ratio) / tau
         else:
             h = tl.load(out_ptr + base + offs, mask=valid, other=0.0) * (g - pg)
-            grad = h + ((1.0 - sig) * h - v * ratio) / tau
+            if FLAT:
+                grad = h
+                tl.store(grad_mask_ptr + base + offs, ((1.0 - sig) * h - v * ratio) / tau, mask=valid)
+            else:
+                grad = h + ((1.0 - sig) * h - v * ratio) / tau
         tl.store(grad_ptr + base + offs, grad, mask=valid)

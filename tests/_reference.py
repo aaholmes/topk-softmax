@@ -40,14 +40,24 @@ def _threshold_row(row, k, tau):
     return 0.5 * (lo + hi)
 
 
-def _mask_row(row, k, tau):
+def _clamp_row(row, k):
+    """Scores above the floor(k)-th largest are lowered to it (flat_top=True)."""
+    kf = int(k // 1)
+    if kf < 1:
+        return row
+    return row.clamp(max=row.sort(descending=True).values[kf - 1].item())
+
+
+def _mask_row(row, k, tau, flat_top=False):
+    if flat_top:
+        row = _clamp_row(row, k)
     return torch.sigmoid((row - _threshold_row(row, k, tau)) / tau)
 
 
-def _soft_row(row, k, tau):
+def _soft_row(row, k, tau, flat_top=False):
     if k >= row.numel():
         return torch.softmax(row, -1)
-    w = torch.softmax(row, -1) * _mask_row(row, k, tau)
+    w = torch.softmax(row, -1) * _mask_row(row, k, tau, flat_top)
     return w / w.sum()
 
 
@@ -75,12 +85,12 @@ def ref_threshold(z, k, tau):
     return t.reshape(*z.shape[:-1], 1)
 
 
-def ref_mask(z, k, tau, dim=-1):
-    return _per_row(lambda r: _mask_row(r, k, tau), z, dim)
+def ref_mask(z, k, tau, dim=-1, flat_top=False):
+    return _per_row(lambda r: _mask_row(r, k, tau, flat_top), z, dim)
 
 
-def ref_soft(z, k, tau, dim=-1):
-    return _per_row(lambda r: _soft_row(r, k, tau), z, dim)
+def ref_soft(z, k, tau, dim=-1, flat_top=False):
+    return _per_row(lambda r: _soft_row(r, k, tau, flat_top), z, dim)
 
 
 def ref_hard(z, k, dim=-1):

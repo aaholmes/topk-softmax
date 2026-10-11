@@ -41,6 +41,27 @@ by scaling its logits up, which bypasses any schedule for τ. The operator also 
 times the standard deviation of the row, below which floating-point arithmetic cannot resolve
 the mask.
 
+### Keeping the ratios among the top k
+
+In the figure above, the largest probability overshoots its final value and the third largest dips
+before rising. At intermediate τ the mask is larger for larger scores, so within the top k it
+favors the largest beyond the ratios a softmax gives. With `flat_top=True` the mask is computed
+from clamped scores instead:
+
+```math
+m_i = \sigma\!\left(\frac{\min(z_i, c) - t}{\tau}\right), \qquad c = \text{the } \lfloor k \rfloor\text{-th largest score}
+```
+
+The k largest entries then share one mask value, so their probabilities keep the ratios
+e^(z_i − z_j) at every τ, and in the example below each of them rises monotonically. Entries
+outside the top k can still rise before they fall. The option is off by default because it needs a
+top-k selection per row: on the GPU used for the timings below it makes the forward pass about
+4 times slower with the Triton kernels and about 2 times slower under `torch.compile`.
+
+<img src="docs/flat_top.png" width="650" alt="Output probabilities as the temperature decreases, with flat_top=True">
+
+### Computing it
+
 Two details make this cheap to compute:
 
 - The sum of the mask decreases monotonically in t, so t is found by bisection, followed by two
@@ -51,7 +72,7 @@ Two details make this cheap to compute:
 
 A mask of this form, a sigmoid with a threshold chosen so the entries sum to k, appears in
 [The Limited Multi-Label Projection Layer](https://arxiv.org/abs/1906.08707) (Amos, Koltun and
-Kolter, 2019).
+Kolter, 2019). With `flat_top=True` it is that mask applied to the clamped scores.
 
 ## Example
 
@@ -97,7 +118,8 @@ yet released.
   effective support exp(entropy), and how much the selected set changed between two checkpoints.
 - On a CUDA GPU, `backend="triton"` runs fused kernels written in Triton, a Python-embedded
   language for GPU kernels. The default `backend="auto"` selects them when they are available.
-- The suite of 691 tests passes on one machine with a CUDA GPU. It covers finite-difference
+- `flat_top=True` keeps the softmax ratios among the top k at every τ, as described above.
+- The suite of 792 tests passes on one machine with a CUDA GPU. It covers finite-difference
   gradient checks, agreement with an independent double-precision reference, the softmax limit at
   large τ, the top-k limit at small τ, inputs with exact ties at the k-th position, the scheduler's
   curves and resume behavior, agreement between CPU and GPU, and agreement between the kernels and
@@ -124,22 +146,25 @@ come from one GPU model and Gaussian random scores.
 ### A synthetic training comparison
 
 `benchmarks/toy.py` trains a small network on a synthetic task whose targets are supported on the
-4 largest of 64 teacher scores. It compares four training methods on 10 paired random seeds, each
+4 largest of 64 teacher scores. It compares five training methods on 10 paired random seeds, each
 scored with exact top-k at test time by total variation distance to the target on held-out inputs
 (lower is better).
 
 | Training method | Median distance | Range over seeds |
 | --- | --- | --- |
+| Soft top-k with `flat_top=True`, τ lowered from 10 to 0.3 | 0.103 | 0.096 to 0.109 |
 | Soft top-k, τ lowered from 10 to 0.3 | 0.113 | 0.102 to 0.122 |
 | Plain softmax | 0.116 | 0.112 to 0.126 |
 | Soft top-k, τ fixed at 0.3 | 0.159 | 0.153 to 0.166 |
 | Exact top-k from the first step | 0.401 | 0.339 to 0.520 |
 
 Lowering τ during training was better than a fixed τ of 0.3 and than exact top-k on all 10 seeds.
-Its advantage over training with a plain softmax was small: a median paired difference of 0.006
-(95% bootstrap interval 0.001 to 0.009), with 8 of 10 seeds in its favor. This is one synthetic
-task, only one fixed value of τ was tried, and the final τ of 0.3 was chosen in earlier runs of the
-annealed method.
+Without `flat_top`, its advantage over training with a plain softmax was small: a median paired
+difference of 0.006 (95% bootstrap interval 0.001 to 0.009), with 8 of 10 seeds in its favor. With
+`flat_top=True` the advantage over plain softmax was 0.015 (0.013 to 0.018) on all 10 seeds, and it
+was better than the version without `flat_top` on 9 of 10 seeds. This is one synthetic task, only
+one fixed value of τ was tried, the final τ of 0.3 was chosen in earlier runs of the annealed
+method, and the `flat_top` arm was added after the other four had been run.
 
 There is no evidence yet that the operator improves a real model.
 

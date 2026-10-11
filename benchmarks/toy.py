@@ -10,6 +10,7 @@ arms are scored the way the model would be used: with exact top-k at test time, 
 distance to the target on held-out inputs.
 
     annealed   soft top-k with tau lowered from 10 to 0.3 by TauScheduler
+    annealed_flat  the annealed arm with flat_top=True (the top k share one mask value)
     fixed_tau  soft top-k with tau = 0.3 throughout
     softmax    a plain softmax during training
     hard       exact top-k during training
@@ -26,7 +27,7 @@ import topk_softmax
 
 N, K, D, STEPS, SEEDS = 64, 4, 16, 2000, 10
 TAU_START, TAU_END = 10.0, 0.3
-ARMS = ["annealed", "fixed_tau", "softmax", "hard"]
+ARMS = ["annealed", "annealed_flat", "fixed_tau", "softmax", "hard"]
 
 
 def held_out_distance(seed, arm):
@@ -43,15 +44,16 @@ def held_out_distance(seed, arm):
     x_held, target_held = data(1024)
 
     torch.manual_seed(seed)
-    layer = topk_softmax.SoftTopKSoftmax(K, tau={"annealed": TAU_START, "fixed_tau": TAU_END}.get(arm, 1.0),
-                                  mode="hard" if arm == "hard" else "soft")
+    annealed = arm in ("annealed", "annealed_flat")
+    layer = topk_softmax.SoftTopKSoftmax(K, tau=TAU_START if annealed else TAU_END,
+                                         mode="hard" if arm == "hard" else "soft", flat_top=arm == "annealed_flat")
     body = torch.nn.Sequential(
         torch.nn.Linear(D, 64), torch.nn.GELU(), torch.nn.Linear(64, N),
         torch.nn.LayerNorm(N, elementwise_affine=False),
     )
     head = torch.nn.Softmax(-1) if arm == "softmax" else layer
     opt = torch.optim.Adam(body.parameters(), 3e-3)
-    sched = topk_softmax.TauScheduler(layer, TAU_START, TAU_END, STEPS) if arm == "annealed" else None
+    sched = topk_softmax.TauScheduler(layer, TAU_START, TAU_END, STEPS) if annealed else None
 
     for _ in range(STEPS):
         b = torch.randint(0, x.shape[0], (256,), generator=g)

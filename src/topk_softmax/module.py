@@ -17,7 +17,7 @@ class SoftTopKSoftmax(torch.nn.Module):
     gradient through the mask vanishes. This costs a second solve for the mask.
     """
 
-    def __init__(self, k, dim=-1, tau=1.0, mode="soft", track_stats=False, backend="auto"):
+    def __init__(self, k, dim=-1, tau=1.0, mode="soft", track_stats=False, backend="auto", flat_top=False):
         super().__init__()
         _validate(k, tau)
         if mode not in _MODES:
@@ -28,6 +28,7 @@ class SoftTopKSoftmax(torch.nn.Module):
             raise ValueError(f"backend must be one of {_BACKENDS}, got {backend!r}")
         self.k = k
         self.backend = backend
+        self.flat_top = flat_top
         self.dim = dim
         self.mode = mode
         self.track_stats = track_stats
@@ -35,7 +36,8 @@ class SoftTopKSoftmax(torch.nn.Module):
         self.register_buffer("tau", torch.tensor(float(tau)))
 
     def forward(self, z):
-        p = _soft_topk_softmax(z, self.k, self.tau, self.dim, self.mode, backend=self.backend)
+        p = _soft_topk_softmax(z, self.k, self.tau, self.dim, self.mode, backend=self.backend,
+                               flat_top=self.flat_top)
         if self.track_stats:
             self._record(z, p)
         return p
@@ -46,7 +48,7 @@ class SoftTopKSoftmax(torch.nn.Module):
             z, p = z.float(), p.float()
         mass = _stats.mass_outside_topk(p, self.k, self.dim)
         if self.k < z.shape[self.dim]:
-            m = soft_topk_mask(z, self.k, self.tau, self.dim, backend=self.backend)
+            m = soft_topk_mask(z, self.k, self.tau, self.dim, backend=self.backend, flat_top=self.flat_top)
             sum_v = (m * (1 - m)).sum(self.dim).mean()
         else:
             sum_v = z.new_zeros(())
