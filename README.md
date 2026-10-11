@@ -121,10 +121,25 @@ and on τ: smaller τ needs more iterations. For rows of 64 scores the compiled 
 faster than the kernels, and `backend="auto"` uses it there under `torch.compile`. These timings
 come from one GPU model and Gaussian random scores.
 
-One test trains a small network on a synthetic task whose targets are supported on the 4 largest
-of 64 teacher scores. On each of 10 random seeds, lowering τ from 10 to 0.3 during training ended
-closer to the target than using exact top-k from the first step. That comparison covers one
-synthetic task and does not separate lowering τ from simply training with a soft output.
+### A synthetic training comparison
+
+`benchmarks/toy.py` trains a small network on a synthetic task whose targets are supported on the
+4 largest of 64 teacher scores. It compares four training methods on 10 paired random seeds, each
+scored with exact top-k at test time by total variation distance to the target on held-out inputs
+(lower is better).
+
+| Training method | Median distance | Range over seeds |
+| --- | --- | --- |
+| Soft top-k, τ lowered from 10 to 0.3 | 0.113 | 0.102 to 0.122 |
+| Plain softmax | 0.116 | 0.112 to 0.126 |
+| Soft top-k, τ fixed at 0.3 | 0.159 | 0.153 to 0.166 |
+| Exact top-k from the first step | 0.401 | 0.339 to 0.520 |
+
+Lowering τ during training was better than a fixed τ of 0.3 and than exact top-k on all 10 seeds.
+Its advantage over training with a plain softmax was small: a median paired difference of 0.006
+(95% bootstrap interval 0.001 to 0.009), with 8 of 10 seeds in its favor. This is one synthetic
+task, only one fixed value of τ was tried, and the final τ of 0.3 was chosen in earlier runs of the
+annealed method.
 
 There is no evidence yet that the operator improves a real model.
 
@@ -139,3 +154,9 @@ uv run pytest                                                   # about 80 secon
 uv run python benchmarks/bench.py --report benchmarks/results/m3.json   # prints the saved timings
 uv run python -m softk.demo --k 1 2 4 --input tie --out figs    # plots the output as a function of τ
 ```
+
+Tests run on CPU for each push through GitHub Actions; the GPU tests run only on a machine with CUDA.
+
+## License
+
+MIT. See `LICENSE`.
