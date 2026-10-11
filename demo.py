@@ -21,7 +21,7 @@ INPUTS = {
 def sweep(out):
     ks = [1, 2, 4]
     taus = torch.logspace(-3, 2, 200, dtype=torch.float64)
-    fig, axes = plt.subplots(len(INPUTS), len(ks), figsize=(11, 8), sharex=True, sharey=True)
+    fig, axes = plt.subplots(len(INPUTS), len(ks), figsize=(7.5, 6), sharex=True, sharey=True)
     cmap = plt.get_cmap("viridis")
     for r, (name, z) in enumerate(INPUTS.items()):
         z = z.double()
@@ -36,14 +36,13 @@ def sweep(out):
             if r == 0:
                 ax.set_title(f"k = {k}")
             if c == 0:
-                ax.set_ylabel(f"{name}\np_i")
+                ax.set_ylabel(f"{name}\np_i (n = {z.numel()})")
             if r == len(INPUTS) - 1:
-                ax.set_xlabel("tau (log scale)")
+                ax.set_xlabel("tau")
             ax.grid(alpha=0.3)
-    axes[0, -1].legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1))
-    fig.suptitle("p_i vs tau; arrows at right = plain softmax", fontsize=11)
+    axes[0, -1].legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False)
     fig.tight_layout()
-    fig.savefig(out, dpi=130)
+    fig.savefig(out, dpi=130, bbox_inches="tight")
 
 
 def train(out, n=64, k=4, steps=3000, tau0=10.0, tau_end=0.01, seed=0):
@@ -71,11 +70,11 @@ def train(out, n=64, k=4, steps=3000, tau0=10.0, tau_end=0.01, seed=0):
             with torch.no_grad():
                 outside = 1 - p.topk(k, -1).values.sum(-1).mean()
             log["step"].append(s); log["tau"].append(tau); log["kl"].append(kl.item()); log["out"].append(outside.item())
-    fig, ax = plt.subplots(1, 2, figsize=(10, 3.6))
-    ax[0].plot(log["step"], log["kl"]); ax[0].set_yscale("log"); ax[0].set_title("KL(target || p)"); ax[0].set_xlabel("step")
+    fig, ax = plt.subplots(1, 2, figsize=(7.5, 3))
+    ax[0].plot(log["step"], log["kl"]); ax[0].set_yscale("log"); ax[0].set_ylabel("KL(target || p) (nats)"); ax[0].set_xlabel(f"step (n = {n}, k = {k})")
     ax[1].plot(log["step"], log["out"], label="mass outside top-k")
     ax[1].plot(log["step"], [t / tau0 for t in log["tau"]], "--", label="tau / tau0")
-    ax[1].set_yscale("log"); ax[1].set_xlabel("step"); ax[1].legend(fontsize=8); ax[1].set_title(f"n={n}, k={k}")
+    ax[1].set_yscale("log"); ax[1].set_xlabel(f"step (n = {n}, k = {k})"); ax[1].legend(fontsize=8, frameon=False)
     for a in ax: a.grid(alpha=0.3)
     fig.tight_layout(); fig.savefig(out, dpi=130)
     print(f"final KL={log['kl'][-1]:.4f}, mass outside top-k={log['out'][-1]:.2e}")

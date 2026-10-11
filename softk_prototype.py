@@ -1,4 +1,6 @@
-"""Prototype: softmax restricted to a soft top-k via a sigmoid-capped mask (LML-style).
+"""Prototype of a softmax restricted to a soft top-k by a sigmoid mask that sums to k.
+
+The mask has the form used by the Limited Multi-Label Projection Layer (Amos, Koltun, Kolter 2019).
 
 p = normalize(softmax(z) * m),  m_i = sigmoid((z_i - t)/tau),  sum_i m_i = k
 Computed in log space: p = softmax(z + logsigmoid((z - t)/tau)).
@@ -31,7 +33,7 @@ class _LogSoftTopKMask(torch.autograd.Function):
         with torch.no_grad():
             t = _solve_threshold(z, k, tau, iters)
             u = (z - t) / tau
-            # one Newton polish step on t
+            # one Newton step to refine t
             sig = torch.sigmoid(u)
             v = sig * (1 - sig)
             t = t + tau * (sig.sum(-1, keepdim=True) - k) / v.sum(-1, keepdim=True).clamp_min(1e-30)

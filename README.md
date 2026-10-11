@@ -3,7 +3,8 @@
 A softmax turns a vector of n scores into a probability distribution in which every entry gets
 some probability. Sparse attention and expert routing instead want only the k highest-scoring
 entries to receive probability. Selecting those k entries outright is discontinuous in the scores,
-and the entries that are not selected receive no gradient, so a model cannot learn to promote them.
+and the entries that are not selected receive no gradient, so training gets no signal about
+which of them should have been selected.
 
 This repository is an early prototype of a PyTorch operator that interpolates between the two. It
 has a temperature τ: at large τ it equals the ordinary softmax, and as τ → 0 it becomes a softmax
@@ -24,6 +25,13 @@ Here σ is the logistic sigmoid, and the threshold t is the single number per ro
 mask sum to k. A small τ makes the sigmoid a step, so the mask is 1 on the k largest scores and 0
 elsewhere. A large τ makes every m_i equal to k/n, a constant that cancels in the ratio. k does
 not have to be an integer.
+
+The scores z_i are the values a model would otherwise pass to a softmax, usually called logits.
+The operator does not normalize them. Because τ is measured in
+the units of the scores, a given value of τ has a fixed meaning only if each row is standardized
+first: zero mean and unit variance across the n scores that share a softmax, for example by a
+layer normalization without a learned scale. Without that step a model can sharpen its own output
+by scaling its logits up, which bypasses any schedule for τ.
 
 Two details make this cheap to compute:
 
@@ -60,8 +68,8 @@ This is a prototype, not yet an installable package.
 - The other 83 tests cover features that are not implemented: an exact top-k mode for inference, a
   straight-through mode (exact top-k forward, soft gradient backward), half-precision inputs, a
   lower bound on τ relative to the spread of the scores, and input validation.
-- One known numerical limit: in single precision, when several scores tie exactly at the k-th
-  position and τ is below about 1e-3, the mask sum misses k by more than the 1e-5 target.
+- There is one known numerical limit. In single precision, when several scores tie exactly at the
+  k-th position and τ is below about 1e-3, the mask sum misses k by more than the 1e-5 target.
 - `demo.py` plots the output as a function of τ and k, and runs a small training example. It
   currently fails on import because it expects the prototype under a different module name.
 
@@ -69,6 +77,8 @@ There is no evidence yet that the operator improves a real model; it has only be
 numerical correctness.
 
 ## Running the prototype's checks
+
+The environment is managed with the Python package manager `uv`.
 
 ```sh
 uv sync

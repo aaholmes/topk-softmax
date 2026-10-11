@@ -1,4 +1,4 @@
-"""Slow fp64 references and input builders for the tests.
+"""Slow double-precision (fp64) references and input builders for the tests.
 
 These are written independently of the library: one row at a time, a wide bisection bracket, and
 the product softmax(z) * m normalized in probability space instead of log space.
