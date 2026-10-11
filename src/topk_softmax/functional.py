@@ -65,14 +65,16 @@ def _hard(z, k):
     return torch.zeros_like(z).scatter(-1, idx, torch.softmax(z.gather(-1, idx), -1))
 
 
-def soft_topk_softmax(z, k, tau, dim=-1, mode="soft", iters=None, backend="auto", flat_top=False):
+def soft_topk_softmax(z, k, tau, dim=-1, mode="soft", iters=None, backend="auto", flat_top=True):
     """Softmax of z along `dim`, restricted to a soft top-k with temperature tau.
 
-    With m_i = sigmoid((z_i - t)/tau) and t chosen so that sum m = k, the result is
-    softmax(z + log m). Large tau gives softmax(z); tau -> 0 gives a softmax over the k largest
-    entries. k may be any positive real number, and k >= n returns softmax(z).
+    With m_i = sigmoid((min(z_i, c) - t)/tau), c the floor(k)-th largest entry and t chosen so
+    that sum m = k, the result is softmax(z + log m). Large tau gives softmax(z); tau -> 0 gives a
+    softmax over the k largest entries. k may be any positive real number, and k >= n returns
+    softmax(z).
 
-    tau is in the units of z and is floored at 1e-4 times the standard deviation of z along `dim`.
+    tau is in the units of z and is floored at 1e-4 times the standard deviation of min(z, c)
+    along `dim`.
 
     mode:
       "soft"  the formula above.
@@ -89,17 +91,18 @@ def soft_topk_softmax(z, k, tau, dim=-1, mode="soft", iters=None, backend="auto"
                 PyTorch operations.
       "auto"    "triton" where it is available and measured to be faster, otherwise "eager".
 
-    flat_top: at intermediate tau the mask is larger for larger scores, which raises the largest
-    of the top k relative to the others beyond their softmax ratios. With flat_top=True the mask is
-    computed from scores clamped at the floor(k)-th largest, so the floor(k) largest entries share
-    one mask value and keep exactly the ratios a softmax gives them, at every tau. This needs a
-    top-k selection per row, which costs more than the operator itself on a GPU.
+    flat_top: the clamp at c gives the floor(k) largest entries one mask value, so they keep
+    exactly the ratios a softmax gives them, and each of their probabilities rises monotonically
+    as tau decreases. flat_top=False computes the mask from z itself, m_i = sigmoid((z_i - t)/tau).
+    That skips finding c and is 1.5 to 2 times faster, but at intermediate tau it raises the
+    largest of the top k beyond their softmax ratios, so their probabilities are not monotonic in
+    tau. The Triton kernels find c themselves; the PyTorch code calls torch.topk.
     """
     _validate(k, tau)
     return _soft_topk_softmax(z, k, tau, dim, mode, iters, backend, flat_top)
 
 
-def _soft_topk_softmax(z, k, tau, dim, mode, iters=None, backend="auto", flat_top=False):
+def _soft_topk_softmax(z, k, tau, dim, mode, iters=None, backend="auto", flat_top=True):
     """soft_topk_softmax without the check on tau, so tau may be a tensor under torch.compile."""
     if mode not in _MODES:
         raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
@@ -114,19 +117,17 @@ def _soft_topk_softmax(z, k, tau, dim, mode, iters=None, backend="auto", flat_to
     if mode == "hard":
         out = _hard(x, k)
     else:
-        w = _mask_scores(x, k, flat_top)
-        if use_triton:
-            out = _triton.run(x, k, tau, _default_iters(x) if iters is None else iters, want_mask=False,
-                              mask_scores=None if w is x else w)
+        if use_triton:  # the kernel clamps the scores itself for flat_top
+            out = _triton.run(x, k, tau, _default_iters(x) if iters is None else iters, False, flat_top)
         else:
-            out = torch.softmax(x + _log_mask(w, k, tau, iters), -1)
+            out = torch.softmax(x + _log_mask(_mask_scores(x, k, flat_top), k, tau, iters), -1)
         if mode == "st":
             # the parenthesized term is exactly zero, so the forward value is the hard output
             out = _hard(x, k).detach() + (out - out.detach())
     return out.transpose(dim, -1).to(z.dtype)
 
 
-def soft_topk_mask(z, k, tau, dim=-1, iters=None, backend="auto", flat_top=False):
+def soft_topk_mask(z, k, tau, dim=-1, iters=None, backend="auto", flat_top=True):
     """The mask m alone: entries in [0, 1] that sum to k along `dim`. Needs k < n.
 
     `backend` and `flat_top` are as in soft_topk_softmax.
@@ -136,9 +137,9 @@ def soft_topk_mask(z, k, tau, dim=-1, iters=None, backend="auto", flat_top=False
         raise ValueError(f"k must be less than the size of dim {dim} ({z.shape[dim]}), got {k}")
     x = z.float() if z.dtype in _HALF_DTYPES else z
     use_triton = _use_triton(x, backend)
-    x = _mask_scores(x.transpose(dim, -1), k, flat_top)
+    x = x.transpose(dim, -1)
     if use_triton:
-        m = _triton.run(x, k, tau, _default_iters(x) if iters is None else iters, want_mask=True)
+        m = _triton.run(x, k, tau, _default_iters(x) if iters is None else iters, True, flat_top)
     else:
-        m = _log_mask(x, k, tau, iters).exp()
+        m = _log_mask(_mask_scores(x, k, flat_top), k, tau, iters).exp()
     return m.transpose(dim, -1).to(z.dtype)

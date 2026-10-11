@@ -38,13 +38,13 @@ def _median_ms(call):
     return statistics.median(times)
 
 
-def _arms(k, tau):
+def _arms(k, tau, flat_top=False):
     torch._dynamo.reset()
     compiled = torch.compile(topk_softmax.soft_topk_softmax)
     return {
-        "triton": lambda z: topk_softmax.soft_topk_softmax(z, k, tau, backend="triton"),
-        "eager": lambda z: topk_softmax.soft_topk_softmax(z, k, tau, backend="eager"),
-        "compiled": lambda z: compiled(z, k, tau, backend="eager"),
+        "triton": lambda z: topk_softmax.soft_topk_softmax(z, k, tau, backend="triton", flat_top=flat_top),
+        "eager": lambda z: topk_softmax.soft_topk_softmax(z, k, tau, backend="eager", flat_top=flat_top),
+        "compiled": lambda z: compiled(z, k, tau, backend="eager", flat_top=flat_top),
     }
 
 
@@ -53,8 +53,9 @@ def _assert_faster(times, speedup):
     assert times["triton"] * speedup <= best_existing, {name: f"{t:.3f} ms" for name, t in times.items()}
 
 
+@pytest.mark.parametrize("flat_top", [False, True])
 @pytest.mark.parametrize("n", [1024, 16384])
-def test_triton_forward_is_faster(n):
+def test_triton_forward_is_faster(n, flat_top):
     z = randn(BATCH, n, dtype=torch.float32).cuda()
 
     def timed(fn):
@@ -63,11 +64,12 @@ def test_triton_forward_is_faster(n):
                 fn(z)
         return _median_ms(call)
 
-    _assert_faster({name: timed(fn) for name, fn in _arms(n // 8, 1.0).items()}, FORWARD_SPEEDUP)
+    _assert_faster({name: timed(fn) for name, fn in _arms(n // 8, 1.0, flat_top).items()}, FORWARD_SPEEDUP)
 
 
+@pytest.mark.parametrize("flat_top", [False, True])
 @pytest.mark.parametrize("n", [1024, 16384])
-def test_triton_forward_and_backward_are_faster(n):
+def test_triton_forward_and_backward_are_faster(n, flat_top):
     z = randn(BATCH, n, dtype=torch.float32).cuda()
     w = randn(BATCH, n, dtype=torch.float32, seed=1).cuda()
 
@@ -77,4 +79,4 @@ def test_triton_forward_and_backward_are_faster(n):
             (fn(x) * w).sum().backward()
         return _median_ms(call)
 
-    _assert_faster({name: timed(fn) for name, fn in _arms(n // 8, 1.0).items()}, FORWARD_BACKWARD_SPEEDUP)
+    _assert_faster({name: timed(fn) for name, fn in _arms(n // 8, 1.0, flat_top).items()}, FORWARD_BACKWARD_SPEEDUP)

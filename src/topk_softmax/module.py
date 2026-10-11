@@ -17,7 +17,7 @@ class SoftTopKSoftmax(torch.nn.Module):
     gradient through the mask vanishes. This costs a second solve for the mask.
     """
 
-    def __init__(self, k, dim=-1, tau=1.0, mode="soft", track_stats=False, backend="auto", flat_top=False):
+    def __init__(self, k, dim=-1, tau=1.0, mode="soft", track_stats=False, backend="auto", flat_top=True):
         super().__init__()
         _validate(k, tau)
         if mode not in _MODES:

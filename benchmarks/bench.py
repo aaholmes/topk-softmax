@@ -3,6 +3,7 @@
     python benchmarks/bench.py --out benchmarks/results/NAME.json    # time the grid, save raw timings
     python benchmarks/bench.py --report benchmarks/results/NAME.json # print tables from a saved file
     python benchmarks/bench.py --profile                             # kernel launches of one eager call
+    python benchmarks/bench.py --passes                              # forward and backward kernels timed separately
     python benchmarks/bench.py --iters                               # mask-sum error versus solver iterations
 
 Arms: `softmax` is torch.softmax, the lower bound for one pass over the data. `eager` is topk_softmax
@@ -35,9 +36,10 @@ def _sync(device):
         torch.cuda.synchronize()
 
 
-def _make_arm(arm, k, tau):
+def _make_arm(arm, k, tau, flat_top=False):
     """A function z -> p for the arm, or None if the arm cannot run here."""
     eager_kw = {"backend": "eager"} if HAS_BACKEND else {}
+    eager_kw["flat_top"] = flat_top
     if arm == "softmax":
         return lambda z: torch.softmax(z, -1)
     if arm == "eager":
@@ -49,7 +51,7 @@ def _make_arm(arm, k, tau):
     if arm == "triton":
         if not HAS_BACKEND:
             return None
-        return lambda z: topk_softmax.soft_topk_softmax(z, k, tau, backend="triton")
+        return lambda z: topk_softmax.soft_topk_softmax(z, k, tau, backend="triton", flat_top=flat_top)
     raise ValueError(arm)
 
 
@@ -66,7 +68,7 @@ def _time(call, device, repeats, budget_s):
     return times
 
 
-def collect(devices, ns, taus, arms, repeats, budget_s):
+def collect(devices, ns, taus, arms, repeats, budget_s, flat_top=False):
     cells = []
     for device in devices:
         for n in ns:
@@ -90,7 +92,7 @@ def collect(devices, ns, taus, arms, repeats, budget_s):
                                           times_ms=_time(lambda: dst.copy_(z), device, repeats, budget_s)))
                         del dst
                         continue
-                    fn = _make_arm(arm, k, tau)
+                    fn = _make_arm(arm, k, tau, flat_top)
                     if fn is None:
                         continue
 
@@ -116,8 +118,8 @@ def collect(devices, ns, taus, arms, repeats, budget_s):
     return cells
 
 
-def _meta():
-    meta = {"torch": torch.__version__, "has_backend": HAS_BACKEND, "cpu_threads": torch.get_num_threads()}
+def _meta(flat_top=False):
+    meta = {"flat_top": flat_top, "torch": torch.__version__, "has_backend": HAS_BACKEND, "cpu_threads": torch.get_num_threads()}
     if torch.cuda.is_available():
         meta["gpu"] = torch.cuda.get_device_name(0)
         meta["cuda"] = torch.version.cuda
@@ -178,6 +180,37 @@ def profile(n=1024, tau=1.0):
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=12, max_name_column_width=40))
 
 
+def passes(ns=(1024, 16384), tau=1.0, repeats=20):
+    """Forward and backward timed separately on the GPU. The backward time is that of one
+    torch.autograd.grad call on a saved output, so it excludes any loss computation."""
+    def timed(fn):
+        for _ in range(3):
+            fn()
+        times = []
+        for _ in range(repeats):
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            fn()
+            torch.cuda.synchronize()
+            times.append((time.perf_counter() - start) * 1e3)
+        return statistics.median(times)
+
+    print(f"\nmedian of {repeats} calls, tau = {tau}, k = n / 8\n")
+    print("| n x batch | operation | forward (ms) | backward (ms) |\n| --- | --- | --- | --- |")
+    for n in ns:
+        z = torch.randn(MAX_BATCH, n, device="cuda", generator=torch.Generator("cuda").manual_seed(0))
+        g = torch.randn_like(z)
+        arms = {"torch.softmax": lambda x: torch.softmax(x, -1)}
+        for flat_top in (True, False):
+            arms[f"triton, flat_top={flat_top}"] = (
+                lambda x, f=flat_top: topk_softmax.soft_topk_softmax(x, n // 8, tau, backend="triton", flat_top=f))
+        for name, fn in arms.items():
+            x = z.clone().requires_grad_()
+            p = fn(x)
+            backward = timed(lambda: torch.autograd.grad(p, x, g, retain_graph=True))
+            print(f"| {n} x {MAX_BATCH} | {name} | {timed(lambda: fn(z)):.3f} | {backward:.3f} |")
+
+
 def iters_sweep():
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
     from _reference import hard_cases
@@ -200,21 +233,25 @@ def main():
     ap.add_argument("--out", help="time the grid and write raw timings to this JSON file")
     ap.add_argument("--report", metavar="FILE", help="print tables from a saved JSON file")
     ap.add_argument("--profile", action="store_true")
+    ap.add_argument("--passes", action="store_true")
     ap.add_argument("--iters", action="store_true")
     ap.add_argument("--devices", nargs="+", default=["cuda", "cpu"] if torch.cuda.is_available() else ["cpu"])
     ap.add_argument("--n", type=int, nargs="+", default=NS)
     ap.add_argument("--tau", type=float, nargs="+", default=TAUS)
     ap.add_argument("--arms", nargs="+", default=ARMS, choices=ARMS)
     ap.add_argument("--repeats", type=int, default=20)
+    ap.add_argument("--flat-top", action="store_true", help="time the operator with flat_top=True, its default")
     ap.add_argument("--budget", type=float, default=20.0, help="seconds per cell before stopping early (at least 3 repeats)")
     a = ap.parse_args()
     if a.out:
-        cells = collect(a.devices, a.n, a.tau, a.arms, a.repeats, a.budget)
+        cells = collect(a.devices, a.n, a.tau, a.arms, a.repeats, a.budget, a.flat_top)
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(a.out).write_text(json.dumps({"meta": _meta(), "cells": cells}, indent=1))
+        Path(a.out).write_text(json.dumps({"meta": _meta(a.flat_top), "cells": cells}, indent=1))
         report(a.out)
     if a.report:
         report(a.report)
+    if a.passes:
+        passes()
     if a.profile:
         profile()
     if a.iters:

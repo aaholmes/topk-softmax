@@ -1,4 +1,4 @@
-"""Four ways to train a network whose output should be supported on its k largest scores.
+"""Five ways to train a network whose output should be supported on its k largest scores.
 
     python benchmarks/toy.py --out benchmarks/results/toy.json     # train (about 2 min, CPU)
     python benchmarks/toy.py --report benchmarks/results/toy.json  # table from a saved file
@@ -9,9 +9,9 @@ weights, batch order, optimizer and step count for a given seed, and none is tun
 arms are scored the way the model would be used: with exact top-k at test time, by total variation
 distance to the target on held-out inputs.
 
-    annealed   soft top-k with tau lowered from 10 to 0.3 by TauScheduler
-    annealed_flat  the annealed arm with flat_top=True (the top k share one mask value)
-    fixed_tau  soft top-k with tau = 0.3 throughout
+    annealed       soft top-k with flat_top=False and tau lowered from 10 to 0.3 by TauScheduler
+    annealed_flat  the annealed arm with flat_top=True, the library default
+    fixed_tau      soft top-k with flat_top=False and tau = 0.3 throughout
     softmax    a plain softmax during training
     hard       exact top-k during training
 """

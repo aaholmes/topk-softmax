@@ -1,4 +1,4 @@
-"""flat_top=True: the mask is computed from scores clamped at the floor(k)-th largest, so the top
+"""flat_top=True (the default): the mask is computed from scores clamped at the floor(k)-th largest, so the top
 floor(k) entries share one mask value and keep their softmax ratios at every tau."""
 import inspect
 
@@ -27,16 +27,15 @@ def on_cuda(test):
 # ---- the definition ----
 
 @pytest.mark.parametrize("fn", ["soft_topk_softmax", "soft_topk_mask", "SoftTopKSoftmax"])
-def test_flat_top_defaults_to_false(fn):
-    assert inspect.signature(getattr(topk_softmax, fn)).parameters["flat_top"].default is False
+def test_flat_top_defaults_to_true(fn):
+    assert inspect.signature(getattr(topk_softmax, fn)).parameters["flat_top"].default is True
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_false_is_the_original_operator(mode):
+def test_true_is_the_default(mode):
     z = randn(5, 12)
-    assert torch.equal(topk_softmax.soft_topk_softmax(z, 3, 0.5, mode=mode, flat_top=False),
-                       topk_softmax.soft_topk_softmax(z, 3, 0.5, mode=mode))
-    assert torch.equal(topk_softmax.soft_topk_mask(z, 3, 0.5, flat_top=False), topk_softmax.soft_topk_mask(z, 3, 0.5))
+    assert torch.equal(soft(z, 3, 0.5, mode=mode), topk_softmax.soft_topk_softmax(z, 3, 0.5, mode=mode))
+    assert torch.equal(mask(z, 3, 0.5), topk_softmax.soft_topk_mask(z, 3, 0.5))
 
 
 @pytest.mark.parametrize("n,k,tau", CASES)
@@ -81,7 +80,7 @@ def test_top_k_keep_their_softmax_ratios(tau):
 def test_the_original_operator_distorts_those_ratios():
     # the reason the option exists: without it the largest score is favored at intermediate tau
     z = torch.tensor([[2.0, 1.5, 1.0, 0.5, 0.0, -0.5, -1.0, -1.5]], dtype=torch.float64)
-    p = topk_softmax.soft_topk_softmax(z, 3, 0.5)
+    p = topk_softmax.soft_topk_softmax(z, 3, 0.5, flat_top=False)
     assert (p[0, 0] / p[0, 2]).item() > 1.05 * torch.exp(z[0, 0] - z[0, 2]).item()
     q = soft(z, 3, 0.5)
     assert (q[0, 0] / q[0, 2]).item() == pytest.approx(torch.exp(z[0, 0] - z[0, 2]).item(), rel=1e-12)
@@ -142,7 +141,7 @@ def test_top_k_entries_are_monotone_in_tau():
 def test_the_original_operator_is_not_monotone():
     z = torch.tensor([2.0, 1.5, 1.0, 0.5, 0.0, -0.5, -1.0, -1.5], dtype=torch.float64)
     taus = torch.logspace(2, -3, 60, dtype=torch.float64)
-    p1 = torch.stack([topk_softmax.soft_topk_softmax(z, 3, float(t)) for t in taus])[:, 0]
+    p1 = torch.stack([topk_softmax.soft_topk_softmax(z, 3, float(t), flat_top=False) for t in taus])[:, 0]
     assert p1.max().item() > p1[-1].item() + 0.01
 
 
@@ -215,7 +214,7 @@ def test_module_passes_flat_top_on():
     assert torch.equal(layer(z), soft(z, 3, 0.5))
     m = mask(z, 3, 0.5)
     assert float(layer.stats["sum_v"]) == pytest.approx(float((m * (1 - m)).sum(-1).mean()), rel=1e-6)
-    assert topk_softmax.SoftTopKSoftmax(3).flat_top is False
+    assert topk_softmax.SoftTopKSoftmax(3).flat_top is True
 
 
 @pytest.mark.slow
@@ -288,3 +287,111 @@ def test_triton_under_torch_compile():
     explanation = torch._dynamo.explain(topk_softmax.soft_topk_softmax)(z, 8, 0.5, flat_top=True, backend="triton")
     assert explanation.graph_break_count == 0, explanation.break_reasons
     torch._dynamo.reset()
+
+
+# ---- the kernel finds the k-th largest score itself ----
+
+def _selection_cases():
+    tie = torch.tensor([[3.0, 2.0, 1.0, 1.0, 1.0, 0.0, -1.0, -2.0]])
+    high = randn(4, 1000).float()
+    high[:, 0] = 1e4
+    low = randn(4, 1000).float()
+    low[:, 0] = -1e4
+    ramp = torch.arange(64.0)[None]
+    cases = [("floor(k) = 1", randn(4, 64).float(), 1), ("floor(k) = n - 1", randn(4, 64).float(), 63),
+             ("constant row", torch.ones(2, 16), 5), ("n = 2", randn(4, 2).float(), 1),
+             ("high outlier", high, 8), ("low outlier", low, 8), ("high outlier, k = 1", high, 1),
+             ("ascending", ramp, 10), ("descending", ramp.flip(-1), 10),
+             ("non-integer k", randn(4, 64).float(), 7.5), ("k below 1", randn(4, 64).float(), 0.5),
+             ("two values", torch.tensor([[1.0, 0.0] * 8]), 3), ("two values, k past the split", torch.tensor([[1.0, 0.0] * 8]), 11)]
+    cases += [(f"ties at the k-th value, k = {k}", tie, k) for k in (2, 3, 4, 5, 6)]
+    return cases
+
+
+@on_cuda
+@pytest.mark.parametrize("tau", [1.0, 0.05])
+def test_triton_selection_edge_cases(tau):
+    for name, z, k in _selection_cases():
+        z = z.cuda()
+        assert_close(mask(z, k, tau, backend="triton").cpu(), mask(z, k, tau, backend="eager").cpu(), 1e-5)
+        assert_close(soft(z, k, tau, backend="triton").cpu(), soft(z, k, tau, backend="eager").cpu(), 1e-6)
+        assert torch.isfinite(_grad(z, k, tau, "triton")).all(), name
+
+
+@on_cuda
+@pytest.mark.parametrize("k", [3, 4, 5])
+@pytest.mark.parametrize("fn", [soft, mask])
+def test_triton_gradient_at_ties(fn, k):
+    # Scores 2, 3 and 4 tie at the k-th value. The kernel splits the gradient routed through the
+    # clamp equally among them; the eager code sends it to one of them. The totals agree.
+    z = torch.tensor([[3.0, 2.0, 1.0, 1.0, 1.0, 0.0, -1.0, -2.0]], device="cuda")
+    weights = torch.tensor([[0.3, -1.1, 0.7, 0.7, 0.7, 0.2, -0.4, 0.9]], device="cuda")
+    grads = {}
+    for backend in ("triton", "eager"):
+        x = z.clone().requires_grad_()
+        (fn(x, k, 0.5, backend=backend) * weights).sum().backward()
+        grads[backend] = x.grad[0].cpu()
+    assert torch.isfinite(grads["triton"]).all()
+    assert_close(grads["triton"][2:5], grads["triton"][2:3].expand(3), 1e-6)
+    assert grads["triton"][2:5].sum().item() == pytest.approx(grads["eager"][2:5].sum().item(), abs=1e-5)
+    untied = [0, 1, 5, 6, 7]
+    assert_close(grads["triton"][untied], grads["eager"][untied], 1e-5)
+
+
+# ---- flat_top=False: the mask is computed from the scores themselves ----
+
+def plain_soft(z, k, tau, **kwargs):
+    return topk_softmax.soft_topk_softmax(z, k, tau, flat_top=False, **kwargs)
+
+
+def plain_mask(z, k, tau, **kwargs):
+    return topk_softmax.soft_topk_mask(z, k, tau, flat_top=False, **kwargs)
+
+
+@pytest.mark.parametrize("n,k,tau", CASES)
+def test_false_matches_the_reference(n, k, tau):
+    z = randn(6, n)
+    assert_close(plain_mask(z, k, tau), ref_mask(z, k, tau, flat_top=False), 1e-10)
+    assert_close(plain_soft(z, k, tau), ref_soft(z, k, tau, flat_top=False), 1e-10)
+    assert (plain_soft(z, k, tau) - soft(z, k, tau)).abs().max().item() > 1e-6 or k < 2
+
+
+def test_false_module_matches_the_function():
+    z = randn(5, 12)
+    layer = topk_softmax.SoftTopKSoftmax(3, tau=0.5, flat_top=False)
+    assert torch.equal(layer(z), plain_soft(z, 3, 0.5))
+
+
+@pytest.mark.parametrize("fn", [plain_soft, plain_mask])
+def test_false_gradcheck(fn):
+    z = randn(3, 7).requires_grad_()
+    assert torch.autograd.gradcheck(lambda x: fn(x, 3, 0.5), (z,), eps=1e-6, atol=1e-5)
+
+
+def _plain_grad(z, k, tau, backend):
+    w = randn(*z.shape, dtype=z.dtype, seed=1).to(z.device)
+    x = z.clone().requires_grad_()
+    (plain_soft(x, k, tau, backend=backend) * w).sum().backward()
+    return x.grad
+
+
+@on_cuda
+@pytest.mark.parametrize("n,k", [(2, 1), (7, 3), (64, 8), (1000, 100), (1000, 999), (1000, 2.5), (16384, 2048)])
+@pytest.mark.parametrize("tau", [10.0, 1.0, 0.05])
+def test_false_triton_matches_eager(n, k, tau):
+    z = randn(3, n, dtype=torch.float32).cuda()
+    assert_close(plain_soft(z, k, tau, backend="triton").cpu(), plain_soft(z, k, tau, backend="eager").cpu(), 1e-6)
+    if k < n - 1:  # at k = n - 1 the one small mask entry is set by rounding in a sum near n
+        assert_close(plain_mask(z, k, tau, backend="triton").cpu(), plain_mask(z, k, tau, backend="eager").cpu(), 1e-5)
+    assert_close(_plain_grad(z, k, tau, "triton").cpu(), _plain_grad(z, k, tau, "eager").cpu(), 1e-5)
+
+
+@on_cuda
+def test_false_triton_hard_cases():
+    for name, z, k, tau in hard_cases(torch.float32):
+        z = z.cuda()
+        p = plain_soft(z, k, tau, backend="triton")
+        assert (p.cpu() - plain_soft(z, k, tau, backend="eager").cpu()).abs().max().item() <= 1e-5, name
+        m = plain_mask(z, k, tau, backend="triton")
+        assert (m.double().sum(-1) - k).abs().max().item() <= mask_sum_tol(k, torch.float32), name
+        assert torch.isfinite(_plain_grad(z, k, tau, "triton")).all(), name

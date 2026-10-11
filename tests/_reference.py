@@ -48,13 +48,13 @@ def _clamp_row(row, k):
     return row.clamp(max=row.sort(descending=True).values[kf - 1].item())
 
 
-def _mask_row(row, k, tau, flat_top=False):
+def _mask_row(row, k, tau, flat_top=True):
     if flat_top:
         row = _clamp_row(row, k)
     return torch.sigmoid((row - _threshold_row(row, k, tau)) / tau)
 
 
-def _soft_row(row, k, tau, flat_top=False):
+def _soft_row(row, k, tau, flat_top=True):
     if k >= row.numel():
         return torch.softmax(row, -1)
     w = torch.softmax(row, -1) * _mask_row(row, k, tau, flat_top)
@@ -85,11 +85,11 @@ def ref_threshold(z, k, tau):
     return t.reshape(*z.shape[:-1], 1)
 
 
-def ref_mask(z, k, tau, dim=-1, flat_top=False):
+def ref_mask(z, k, tau, dim=-1, flat_top=True):
     return _per_row(lambda r: _mask_row(r, k, tau, flat_top), z, dim)
 
 
-def ref_soft(z, k, tau, dim=-1, flat_top=False):
+def ref_soft(z, k, tau, dim=-1, flat_top=True):
     return _per_row(lambda r: _soft_row(r, k, tau, flat_top), z, dim)
 
 

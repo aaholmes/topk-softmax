@@ -57,6 +57,7 @@ def _newton_log_mask(z, k, tau):
     t0 and the denominator are constants, so autograd gives dt/dz_j = v_j / sum(v), which is the
     implicit-function-theorem derivative the custom backward is supposed to implement.
     """
+    z = torch.minimum(z, z.topk(int(k), -1).values[..., -1:])  # the default flat_top clamp
     t0 = ref_threshold(z, k, tau)
     s0 = torch.sigmoid((z.detach() - t0) / tau)
     v0 = (s0 * (1 - s0)).sum(-1, keepdim=True)

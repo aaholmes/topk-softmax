@@ -6,7 +6,7 @@ writes figs/sweep_spread.png: one panel per k, one line per output entry p_i, wi
 axis. The markers at the right edge are softmax(z), the large-tau limit.
 
     --flow PATH    one input and one k, with tau decreasing left to right (the README figure);
-                   add --flat-top for the variant in which the top k share one mask value
+                   add --no-flat-top for the variant whose mask uses the unclamped scores
     --train PATH   a toy training run with tau annealed by TauScheduler
 
 Needs matplotlib, which the `demo` extra installs.
@@ -49,7 +49,7 @@ def sweep(plt, out, name, ks, tau_min, tau_max):
     fig.savefig(out, dpi=130, bbox_inches="tight")
 
 
-def flow(plt, out, k=3, flat_top=False):
+def flow(plt, out, k=3, flat_top=True):
     z = INPUTS["spread"].double()
     n = z.numel()
     taus = torch.logspace(2, -3, 300, dtype=torch.float64)
@@ -123,7 +123,8 @@ def main(argv=None):
     ap.add_argument("--input", choices=list(INPUTS), default="spread")
     ap.add_argument("--out", help="directory for sweep_<input>.png (default: figs)")
     ap.add_argument("--flow", metavar="PATH", help="also write the README figure to PATH")
-    ap.add_argument("--flat-top", action="store_true", help="draw the --flow figure with flat_top=True")
+    ap.add_argument("--flat-top", action=argparse.BooleanOptionalAction, default=True,
+                    help="--no-flat-top draws the --flow figure with flat_top=False")
     ap.add_argument("--train", metavar="PATH", help="also write the toy training figure to PATH")
     a = ap.parse_args(argv)
     if not 0 < a.tau_min < a.tau_max:

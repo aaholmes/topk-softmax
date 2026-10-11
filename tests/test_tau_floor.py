@@ -1,4 +1,5 @@
-"""tau is floored at 1e-4 * std(z), with std taken per row along `dim`."""
+"""tau is floored at 1e-4 * std, with std taken per row along `dim` over the scores the mask is
+computed from: z with its entries above the k-th largest lowered to it."""
 import pytest
 import torch
 
@@ -23,7 +24,7 @@ def _rows():
 
 
 def _expected(fn, z):
-    return torch.stack([fn(r, K, FLOOR * r.std().item()) for r in z])
+    return torch.stack([fn(r, K, FLOOR * r.clamp(max=r.topk(K).values[-1]).std(correction=0).item()) for r in z])
 
 
 def test_the_construction_makes_the_floor_observable():
@@ -31,8 +32,7 @@ def test_the_construction_makes_the_floor_observable():
     assert (_expected(ref_soft, z) - ref_hard(z, K)).abs().max().item() > 1e-2
 
 
-# 2e-3 leaves room for either std convention (n or n - 1 in the denominator), which moves p by
-# about 2e-4 here; ignoring the floor moves p by more than 1e-2.
+# The std is the population form (n in the denominator). Ignoring the floor moves p by more than 1e-2.
 @pytest.mark.parametrize("tau", [1e-9, 1e-6])
 def test_softmax_uses_the_per_row_floor(tau):
     z = _rows()
