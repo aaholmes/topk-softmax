@@ -6,10 +6,10 @@ entries to receive probability. Selecting those k entries outright is discontinu
 and the entries that are not selected receive no gradient, so training gets no signal about
 which of them should have been selected.
 
-This repository is an early prototype of a PyTorch operator that interpolates between the two. It
+This repository is an early implementation of a PyTorch operator that interpolates between the two. It
 has a temperature τ: at large τ it equals the ordinary softmax, and as τ → 0 it becomes a softmax
 over only the k largest scores. It is differentiable at every τ > 0, so τ can start large and be
-lowered during training. The planned package name is `softk`.
+lowered during training. The package is named `softk`.
 
 <img src="docs/softmax_to_topk.png" width="650" alt="Output probabilities as the temperature decreases">
 
@@ -37,12 +37,14 @@ The operator does not normalize them. Because τ is measured in
 the units of the scores, a given value of τ has a fixed meaning only if each row is standardized
 first: zero mean and unit variance across the n scores that share a softmax, for example by a
 layer normalization without a learned scale. Without that step a model can sharpen its own output
-by scaling its logits up, which bypasses any schedule for τ.
+by scaling its logits up, which bypasses any schedule for τ. The operator also floors τ at 1e-4
+times the standard deviation of the row, below which floating-point arithmetic cannot resolve
+the mask.
 
 Two details make this cheap to compute:
 
-- The sum of the mask decreases monotonically in t, so t is found by bisection, followed by one
-  Newton step.
+- The sum of the mask decreases monotonically in t, so t is found by bisection, followed by two
+  Newton steps.
 - The backward pass does not differentiate through the bisection. It uses the implicit function
   theorem on the constraint Σm = k, which gives a closed-form gradient costing two sums per row.
 
@@ -54,40 +56,38 @@ Kolter, 2019).
 
 ```python
 import torch
-from softk_prototype import soft_topk_softmax
+from softk import soft_topk_softmax
 
 z = torch.randn(4, 10)
-p = soft_topk_softmax(z, k=3, tau=0.1)   # each row sums to 1; mass concentrates on the top 3
+p = soft_topk_softmax(z, k=3, tau=0.1)                # each row sums to 1; mass concentrates on the top 3
+p = soft_topk_softmax(z, k=3, tau=0.1, mode="hard")   # exactly 3 nonzero entries per row
 ```
 
 ## Status
 
-This is a prototype, not yet an installable package.
+The core operator is implemented and tested on CPU. It is not yet released as a package.
 
-- `softk_prototype.py` implements the operator and its custom backward pass in about 100 lines.
-- `tests/` is a suite of 303 tests that defines what the first packaged version must do. It was
-  written before the package, and it imports a `softk` module that does not exist yet, so it
-  cannot run as-is.
-- Run on the prototype through a temporary import alias, 220 of the 303 tests pass. These cover
-  finite-difference gradient checks, agreement with an independent double-precision reference,
-  the softmax limit at large τ, and the top-k limit at small τ.
-- The other 83 tests cover features that are not implemented: an exact top-k mode for inference, a
-  straight-through mode (exact top-k forward, soft gradient backward), half-precision inputs, a
-  lower bound on τ relative to the spread of the scores, and input validation.
-- There is one known numerical limit. In single precision, when several scores tie exactly at the
-  k-th position and τ is below about 1e-3, the mask sum misses k by more than the 1e-5 target.
+- `soft_topk_softmax` and `soft_topk_mask` work along any dimension, in 16-, 32- and 64-bit
+  floating point, and compile with `torch.compile` without graph breaks.
+- Three modes are available: the soft formula above, an exact top-k mode for inference, and a
+  straight-through mode that outputs the exact top-k result and uses the soft gradient.
+- The suite of 303 tests passes. It covers finite-difference gradient checks, agreement with an
+  independent double-precision reference, the softmax limit at large τ, the top-k limit at small τ,
+  and inputs with exact ties at the k-th position.
+- Not implemented yet: a scheduler that lowers τ during training, a module wrapper, and fused GPU
+  kernels. Nothing has been run on a GPU.
 - `demo.py` draws the figure above, plots the output for several inputs and values of k, and runs
   a small training example on synthetic data.
 
 There is no evidence yet that the operator improves a real model; it has only been checked for
 numerical correctness.
 
-## Running the prototype
+## Running it
 
 The environment is managed with the Python package manager `uv`.
 
 ```sh
-uv sync
-uv run python softk_prototype.py   # prints gradient checks and both limits
-uv run python demo.py               # writes sweep.png, flow.png and train.png
+uv sync                  # installs softk in editable mode with its test dependencies
+uv run pytest            # about 30 seconds on CPU
+uv run python demo.py    # writes sweep.png, flow.png and train.png
 ```

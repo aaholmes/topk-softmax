@@ -10,7 +10,7 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from softk_prototype import soft_topk_softmax
+from softk import soft_topk_softmax
 
 INPUTS = {
     "spread":    torch.tensor([2.0, 1.5, 1.0, 0.5, 0.0, -0.5, -1.0, -1.5]),
