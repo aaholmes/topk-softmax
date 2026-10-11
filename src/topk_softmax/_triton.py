@@ -4,7 +4,7 @@ One kernel program handles one row. It reads the row in blocks, finds the thresh
 output; nothing of the row's size is stored in between. Unlike the PyTorch implementation, the
 loops stop as soon as the row has converged, which is where the speed comes from.
 
-triton is imported on first use, so importing softk does not need it.
+triton is imported on first use, so importing topk_softmax does not need it.
 """
 import math
 
@@ -71,7 +71,7 @@ def _load():
     def block(n, largest):
         return min(largest, max(16, triton.next_power_of_2(n)))
 
-    @triton_op("softk::soft_topk_forward", mutates_args={})
+    @triton_op("topk_softmax::soft_topk_forward", mutates_args={})
     def forward_op(z: torch.Tensor, tau_tensor: torch.Tensor | None, tau_number: float, k: float,
                    max_iters: int, want_mask: bool) -> tuple[torch.Tensor, torch.Tensor]:
         rows, n = z.shape
@@ -85,7 +85,7 @@ def _load():
             BLOCK=block(n, _FORWARD_BLOCK), num_warps=_forward_thread_groups(n))
         return out, state
 
-    @triton_op("softk::soft_topk_backward", mutates_args={})
+    @triton_op("topk_softmax::soft_topk_backward", mutates_args={})
     def backward_op(z: torch.Tensor, out: torch.Tensor, state: torch.Tensor, g: torch.Tensor,
                     want_mask: bool) -> torch.Tensor:
         rows, n = z.shape

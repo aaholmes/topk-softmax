@@ -2,7 +2,7 @@
 import pytest
 import torch
 
-import softk
+import topk_softmax
 from _reference import assert_close, ref_hard, ref_mask, ref_soft
 
 K = 3
@@ -36,20 +36,20 @@ def test_the_construction_makes_the_floor_observable():
 @pytest.mark.parametrize("tau", [1e-9, 1e-6])
 def test_softmax_uses_the_per_row_floor(tau):
     z = _rows()
-    assert_close(softk.soft_topk_softmax(z, K, tau), _expected(ref_soft, z), 2e-3)
+    assert_close(topk_softmax.soft_topk_softmax(z, K, tau), _expected(ref_soft, z), 2e-3)
 
 
 @pytest.mark.parametrize("tau", [1e-9, 1e-6])
 def test_mask_uses_the_per_row_floor(tau):
     z = _rows()
-    assert_close(softk.soft_topk_mask(z, K, tau), _expected(ref_mask, z), 5e-3)
+    assert_close(topk_softmax.soft_topk_mask(z, K, tau), _expected(ref_mask, z), 5e-3)
 
 
 def test_floor_follows_dim():
     z = _rows().T.contiguous()  # rows now run along dim 0
-    assert_close(softk.soft_topk_softmax(z, K, 1e-9, dim=0), _expected(ref_soft, _rows()).T, 2e-3)
+    assert_close(topk_softmax.soft_topk_softmax(z, K, 1e-9, dim=0), _expected(ref_soft, _rows()).T, 2e-3)
 
 
 def test_tau_above_the_floor_is_used_unchanged():
     z = _rows()[:1]
-    assert_close(softk.soft_topk_softmax(z, K, 0.05), ref_soft(z, K, 0.05), 1e-9)
+    assert_close(topk_softmax.soft_topk_softmax(z, K, 0.05), ref_soft(z, K, 0.05), 1e-9)

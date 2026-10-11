@@ -1,13 +1,13 @@
 import pytest
 import torch
 
-import softk
+import topk_softmax
 from _reference import assert_close, randn, ref_hard, separated
 
 
 def _forward_backward(z, k, tau):
     z = z.clone().requires_grad_()
-    p = softk.soft_topk_softmax(z, k, tau)
+    p = topk_softmax.soft_topk_softmax(z, k, tau)
     (p * randn(*z.shape, dtype=z.dtype, seed=1)).sum().backward()
     return p.detach(), z.grad
 
@@ -54,7 +54,7 @@ def test_tie_at_the_kth_position(dtype, tau):
     z = torch.tensor([[3.0, 2.0, 1.0, 1.0, 1.0, 0.0, -1.0, -2.0]], dtype=dtype)
     p, grad = _assert_finite(z, 3, tau)
     assert_close(p[:, 2:5], p[:, 2:3].expand(-1, 3), 1e-6)
-    m = softk.soft_topk_mask(z, 3, tau)
+    m = topk_softmax.soft_topk_mask(z, 3, tau)
     assert torch.isfinite(m).all()
     assert_close(m.sum(-1), torch.tensor([3.0]), 1e-5)
     assert_close(m[:, 2:5], m[:, 2:3].expand(-1, 3), 1e-6)

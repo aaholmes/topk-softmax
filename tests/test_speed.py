@@ -11,7 +11,7 @@ import time
 import pytest
 import torch
 
-import softk
+import topk_softmax
 from _reference import randn
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow,
@@ -40,10 +40,10 @@ def _median_ms(call):
 
 def _arms(k, tau):
     torch._dynamo.reset()
-    compiled = torch.compile(softk.soft_topk_softmax)
+    compiled = torch.compile(topk_softmax.soft_topk_softmax)
     return {
-        "triton": lambda z: softk.soft_topk_softmax(z, k, tau, backend="triton"),
-        "eager": lambda z: softk.soft_topk_softmax(z, k, tau, backend="eager"),
+        "triton": lambda z: topk_softmax.soft_topk_softmax(z, k, tau, backend="triton"),
+        "eager": lambda z: topk_softmax.soft_topk_softmax(z, k, tau, backend="eager"),
         "compiled": lambda z: compiled(z, k, tau, backend="eager"),
     }
 

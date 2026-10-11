@@ -7,7 +7,7 @@ pytestmark = pytest.mark.slow
 
 
 def _demo(*args):
-    return subprocess.run([sys.executable, "-m", "softk.demo", *args], capture_output=True, text=True)
+    return subprocess.run([sys.executable, "-m", "topk_softmax.demo", *args], capture_output=True, text=True)
 
 
 @pytest.mark.parametrize("name", ["spread", "tie", "spike", "random"])

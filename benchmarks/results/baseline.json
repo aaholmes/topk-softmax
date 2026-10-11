@@ -1,7 +1,7 @@
 {
  "meta": {
   "torch": "2.14.1+cu130",
-  "softk_has_backend": false,
+  "has_backend": false,
   "cpu_threads": 16,
   "gpu": "NVIDIA GeForce RTX 5060 Ti",
   "cuda": "13.0",

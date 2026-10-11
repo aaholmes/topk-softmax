@@ -1,11 +1,11 @@
-"""Timing, profiling and solver-accuracy measurements for softk.
+"""Timing, profiling and solver-accuracy measurements for topk_softmax.
 
     python benchmarks/bench.py --out benchmarks/results/NAME.json    # time the grid, save raw timings
     python benchmarks/bench.py --report benchmarks/results/NAME.json # print tables from a saved file
     python benchmarks/bench.py --profile                             # kernel launches of one eager call
     python benchmarks/bench.py --iters                               # mask-sum error versus solver iterations
 
-Arms: `softmax` is torch.softmax, the lower bound for one pass over the data. `eager` is softk
+Arms: `softmax` is torch.softmax, the lower bound for one pass over the data. `eager` is topk_softmax
 without compilation, `compiled` is torch.compile of the eager code, and `triton` is the fused kernel
 (skipped until the `backend` argument exists). All arms in a cell run on one input tensor.
 `copy` times a tensor copy of the input, as a measured stand-in for the memory-bandwidth limit.
@@ -20,14 +20,14 @@ from pathlib import Path
 
 import torch
 
-import softk
+import topk_softmax
 
 NS = [64, 1024, 16384, 131072]
 TAUS = [1.0, 0.01]
 MAX_BATCH = 4096
 MAX_INPUT_BYTES = 2**29  # the batch is halved until the input fits
 ARMS = ["copy", "softmax", "eager", "compiled", "triton"]
-HAS_BACKEND = "backend" in inspect.signature(softk.soft_topk_softmax).parameters
+HAS_BACKEND = "backend" in inspect.signature(topk_softmax.soft_topk_softmax).parameters
 
 
 def _sync(device):
@@ -41,15 +41,15 @@ def _make_arm(arm, k, tau):
     if arm == "softmax":
         return lambda z: torch.softmax(z, -1)
     if arm == "eager":
-        return lambda z: softk.soft_topk_softmax(z, k, tau, **eager_kw)
+        return lambda z: topk_softmax.soft_topk_softmax(z, k, tau, **eager_kw)
     if arm == "compiled":
         torch._dynamo.reset()
-        fn = torch.compile(softk.soft_topk_softmax)
+        fn = torch.compile(topk_softmax.soft_topk_softmax)
         return lambda z: fn(z, k, tau, **eager_kw)
     if arm == "triton":
         if not HAS_BACKEND:
             return None
-        return lambda z: softk.soft_topk_softmax(z, k, tau, backend="triton")
+        return lambda z: topk_softmax.soft_topk_softmax(z, k, tau, backend="triton")
     raise ValueError(arm)
 
 
@@ -117,7 +117,7 @@ def collect(devices, ns, taus, arms, repeats, budget_s):
 
 
 def _meta():
-    meta = {"torch": torch.__version__, "softk_has_backend": HAS_BACKEND, "cpu_threads": torch.get_num_threads()}
+    meta = {"torch": torch.__version__, "has_backend": HAS_BACKEND, "cpu_threads": torch.get_num_threads()}
     if torch.cuda.is_available():
         meta["gpu"] = torch.cuda.get_device_name(0)
         meta["cuda"] = torch.version.cuda
@@ -163,7 +163,7 @@ def profile(n=1024, tau=1.0):
     z = torch.randn(MAX_BATCH, n, device="cuda")
     k = n // 8
     for name, fn in (("softmax", lambda: torch.softmax(z, -1)),
-                     ("eager softk", lambda: softk.soft_topk_softmax(z, k, tau))):
+                     ("eager topk_softmax", lambda: topk_softmax.soft_topk_softmax(z, k, tau))):
         with torch.no_grad():
             for _ in range(5):
                 fn()
@@ -189,7 +189,7 @@ def iters_sweep():
         print("| --- |" + " --- |" * len(counts))
         worst = [0.0] * len(counts)
         for name, z, k, tau in hard_cases(dtype):
-            errs = [(softk.soft_topk_mask(z, k, tau, iters=c).double().sum(-1) - k).abs().max().item() for c in counts]
+            errs = [(topk_softmax.soft_topk_mask(z, k, tau, iters=c).double().sum(-1) - k).abs().max().item() for c in counts]
             worst = [max(a, b) for a, b in zip(worst, errs)]
             print(f"| {name} | " + " | ".join(f"{e:.1e}" for e in errs) + " |")
         print("| **worst case** | " + " | ".join(f"{e:.1e}" for e in worst) + " |")

@@ -21,8 +21,8 @@ from pathlib import Path
 
 import torch
 
-import softk
-import softk._autograd as autograd
+import topk_softmax
+import topk_softmax._autograd as autograd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
 from _reference import hard_cases  # noqa: E402
@@ -183,12 +183,12 @@ def collect():
                         return solver(zc, k_, tau_, iters, seen["trace"])
 
                     autograd._solve_threshold = record
-                    softk.soft_topk_mask(z, k, tau, iters=n_iters)
+                    topk_softmax.soft_topk_mask(z, k, tau, iters=n_iters)
                     raw = [_f(seen["z"], t, k, seen["tau"])[0].double().abs().flatten() for t in seen["trace"]]
                     polished = []
                     for t in seen["trace"]:
                         autograd._solve_threshold = lambda *a, t=t: t
-                        m = softk.soft_topk_mask(z, k, tau, iters=n_iters)
+                        m = topk_softmax.soft_topk_mask(z, k, tau, iters=n_iters)
                         polished.append((m.double().sum(-1) - k).abs().flatten())
                     records.append(dict(meta, solver=name, dtype=str(dtype).split(".")[-1], rows=z.shape[0],
                                         raw=_summary(raw), polished=_summary(polished)))
@@ -288,7 +288,7 @@ def time_compiled(specs, ns=(1024, 16384), batch=4096, tau=1.0):
                 name, iters = spec.split(":")
                 autograd._solve_threshold = lambda zc, k, t, i, solver=SOLVERS[name]: solver(zc, k, t, i)
                 torch._dynamo.reset()
-                fn = torch.compile(softk.soft_topk_softmax)
+                fn = torch.compile(topk_softmax.soft_topk_softmax)
                 with torch.no_grad():
                     for _ in range(5):
                         fn(z, n // 8, tau, iters=int(iters))

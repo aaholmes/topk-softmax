@@ -11,7 +11,7 @@ it does not separate annealing from starting soft.
 import pytest
 import torch
 
-import softk
+import topk_softmax
 
 pytestmark = pytest.mark.slow
 
@@ -32,13 +32,13 @@ def _held_out_distance(seed, anneal):
     x_held, target_held = data(1024)
 
     torch.manual_seed(seed)
-    layer = softk.SoftTopKSoftmax(K, tau=10.0, mode="soft" if anneal else "hard")
+    layer = topk_softmax.SoftTopKSoftmax(K, tau=10.0, mode="soft" if anneal else "hard")
     model = torch.nn.Sequential(
         torch.nn.Linear(D, 64), torch.nn.GELU(), torch.nn.Linear(64, N),
         torch.nn.LayerNorm(N, elementwise_affine=False), layer,
     )
     opt = torch.optim.Adam(model.parameters(), 3e-3)
-    sched = softk.TauScheduler(layer, 10.0, 0.3, STEPS) if anneal else None
+    sched = topk_softmax.TauScheduler(layer, 10.0, 0.3, STEPS) if anneal else None
 
     for _ in range(STEPS):
         b = torch.randint(0, x.shape[0], (256,), generator=g)

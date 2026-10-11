@@ -1,4 +1,4 @@
-# topkmax
+# topk-softmax
 
 A softmax turns a vector of n scores into a probability distribution in which every entry gets
 some probability. Sparse attention and expert routing instead want only the k highest-scoring
@@ -9,7 +9,7 @@ which of them should have been selected.
 This repository is an early implementation of a PyTorch operator that interpolates between the two. It
 has a temperature τ: at large τ it equals the ordinary softmax, and as τ → 0 it becomes a softmax
 over only the k largest scores. It is differentiable at every τ > 0, so τ can start large and be
-lowered during training. The package is named `softk`.
+lowered during training. The package installs as `topk-softmax` and is imported as `topk_softmax`.
 
 <img src="docs/softmax_to_topk.png" width="650" alt="Output probabilities as the temperature decreases">
 
@@ -57,7 +57,7 @@ Kolter, 2019).
 
 ```python
 import torch
-from softk import soft_topk_softmax
+from topk_softmax import soft_topk_softmax
 
 z = torch.randn(4, 10)
 p = soft_topk_softmax(z, k=3, tau=0.1)                # each row sums to 1; mass concentrates on the top 3
@@ -68,7 +68,7 @@ In a model, the module `SoftTopKSoftmax` holds τ in a buffer, and `TauScheduler
 training:
 
 ```python
-from softk import SoftTopKSoftmax, TauScheduler
+from topk_softmax import SoftTopKSoftmax, TauScheduler
 
 layer = SoftTopKSoftmax(k=3, track_stats=True)          # use in place of torch.nn.Softmax
 sched = TauScheduler(layer, tau_start=10.0, tau_end=0.3, total_steps=10_000)
@@ -93,7 +93,7 @@ yet released.
 - `TauScheduler` supports three decay curves, an optional early stop once almost no probability
   remains outside the top k, an optional final phase in straight-through mode, and saving and
   resuming.
-- `softk.stats` has three quantities to log during training: the probability outside the top k, the
+- `topk_softmax.stats` has three quantities to log during training: the probability outside the top k, the
   effective support exp(entropy), and how much the selected set changed between two checkpoints.
 - On a CUDA GPU, `backend="triton"` runs fused kernels written in Triton, a Python-embedded
   language for GPU kernels. The default `backend="auto"` selects them when they are available.
@@ -148,11 +148,11 @@ There is no evidence yet that the operator improves a real model.
 The environment is managed with the Python package manager `uv`.
 
 ```sh
-uv sync                  # installs softk in editable mode with its test dependencies
+uv sync                  # installs topk-softmax in editable mode with its test dependencies
 uv run pytest -m "not slow"                                     # about 10 seconds on CPU
 uv run pytest                                                   # about 80 seconds; adds compilation, training and timing tests
 uv run python benchmarks/bench.py --report benchmarks/results/m3.json   # prints the saved timings
-uv run python -m softk.demo --k 1 2 4 --input tie --out figs    # plots the output as a function of τ
+uv run python -m topk_softmax.demo --k 1 2 4 --input tie --out figs    # plots the output as a function of τ
 ```
 
 Tests run on CPU for each push through GitHub Actions; the GPU tests run only on a machine with CUDA.

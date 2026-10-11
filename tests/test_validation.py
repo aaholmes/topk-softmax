@@ -1,9 +1,9 @@
 import pytest
 
-import softk
+import topk_softmax
 from _reference import randn
 
-FUNCTIONS = [softk.soft_topk_softmax, softk.soft_topk_mask]
+FUNCTIONS = [topk_softmax.soft_topk_softmax, topk_softmax.soft_topk_mask]
 
 
 @pytest.mark.parametrize("fn", FUNCTIONS)
@@ -23,8 +23,8 @@ def test_nonpositive_tau_raises(fn, tau):
 @pytest.mark.parametrize("mode", ["hard", "st"])
 def test_non_integer_k_raises_in_hard_modes(mode):
     with pytest.raises(ValueError):
-        softk.soft_topk_softmax(randn(4, 10), 2.5, 1.0, mode=mode)
+        topk_softmax.soft_topk_softmax(randn(4, 10), 2.5, 1.0, mode=mode)
 
 
 def test_non_integer_k_is_allowed_in_soft_mode():
-    softk.soft_topk_softmax(randn(4, 10), 2.5, 1.0, mode="soft")
+    topk_softmax.soft_topk_softmax(randn(4, 10), 2.5, 1.0, mode="soft")

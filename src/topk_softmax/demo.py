@@ -1,6 +1,6 @@
 """Figures showing how p = soft_topk_softmax(z, k, tau) moves from softmax to top-k softmax.
 
-    python -m softk.demo --k 1 2 4 --input spread --out figs/
+    python -m topk_softmax.demo --k 1 2 4 --input spread --out figs/
 
 writes figs/sweep_spread.png: one panel per k, one line per output entry p_i, with tau on a log
 axis. The markers at the right edge are softmax(z), the large-tau limit.
@@ -115,7 +115,7 @@ def train(plt, out, n=64, k=4, steps=3000, tau_start=10.0, tau_end=0.3, seed=0):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="python -m softk.demo", description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(prog="python -m topk_softmax.demo", description=__doc__.split("\n")[0])
     ap.add_argument("--k", type=float, nargs="+", default=[1, 2, 4], help="one panel per value")
     ap.add_argument("--tau-min", type=float, default=1e-3)
     ap.add_argument("--tau-max", type=float, default=1e2)
@@ -132,7 +132,7 @@ def main(argv=None):
     try:
         import matplotlib
     except ImportError:
-        raise SystemExit("softk.demo needs matplotlib: pip install 'softk[demo]'")
+        raise SystemExit("topk_softmax.demo needs matplotlib: pip install 'topk-softmax[demo]'")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 

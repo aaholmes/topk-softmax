@@ -7,7 +7,7 @@ accuracy; the last requires those counts to be the defaults.
 import pytest
 import torch
 
-import softk
+import topk_softmax
 from _reference import hard_cases, mask_sum_tol, ref_mask
 
 ITERS = {torch.float32: 20, torch.float64: 24}
@@ -18,7 +18,7 @@ CASES = {name: (z, k, tau) for name, z, k, tau in hard_cases()}
 @pytest.mark.parametrize("name", CASES)
 def test_mask_sums_to_k_with_the_reduced_iteration_count(dtype, name):
     z, k, tau = CASES[name]
-    m = softk.soft_topk_mask(z.to(dtype), k, tau, iters=ITERS[dtype])
+    m = topk_softmax.soft_topk_mask(z.to(dtype), k, tau, iters=ITERS[dtype])
     assert torch.isfinite(m).all()
     assert (m.double().sum(-1) - k).abs().max().item() <= mask_sum_tol(k, dtype)
 
@@ -27,7 +27,7 @@ def test_mask_sums_to_k_with_the_reduced_iteration_count(dtype, name):
 def test_mask_matches_the_reference_with_the_reduced_iteration_count(name):
     # restricted to tau above the floor, where the reference and the library solve one equation
     z, k, tau = CASES[name]
-    m = softk.soft_topk_mask(z, k, tau, iters=ITERS[torch.float64])
+    m = topk_softmax.soft_topk_mask(z, k, tau, iters=ITERS[torch.float64])
     assert (m - ref_mask(z, k, tau)).abs().max().item() <= 1e-9
 
 
@@ -35,4 +35,4 @@ def test_mask_matches_the_reference_with_the_reduced_iteration_count(name):
 def test_the_reduced_counts_are_the_defaults(dtype):
     for name, (z, k, tau) in CASES.items():
         z = z.to(dtype)
-        assert torch.equal(softk.soft_topk_mask(z, k, tau), softk.soft_topk_mask(z, k, tau, iters=ITERS[dtype])), name
+        assert torch.equal(topk_softmax.soft_topk_mask(z, k, tau), topk_softmax.soft_topk_mask(z, k, tau, iters=ITERS[dtype])), name

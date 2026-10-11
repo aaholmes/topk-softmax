@@ -22,7 +22,7 @@ from pathlib import Path
 
 import torch
 
-import softk
+import topk_softmax
 
 N, K, D, STEPS, SEEDS = 64, 4, 16, 2000, 10
 TAU_START, TAU_END = 10.0, 0.3
@@ -43,7 +43,7 @@ def held_out_distance(seed, arm):
     x_held, target_held = data(1024)
 
     torch.manual_seed(seed)
-    layer = softk.SoftTopKSoftmax(K, tau={"annealed": TAU_START, "fixed_tau": TAU_END}.get(arm, 1.0),
+    layer = topk_softmax.SoftTopKSoftmax(K, tau={"annealed": TAU_START, "fixed_tau": TAU_END}.get(arm, 1.0),
                                   mode="hard" if arm == "hard" else "soft")
     body = torch.nn.Sequential(
         torch.nn.Linear(D, 64), torch.nn.GELU(), torch.nn.Linear(64, N),
@@ -51,7 +51,7 @@ def held_out_distance(seed, arm):
     )
     head = torch.nn.Softmax(-1) if arm == "softmax" else layer
     opt = torch.optim.Adam(body.parameters(), 3e-3)
-    sched = softk.TauScheduler(layer, TAU_START, TAU_END, STEPS) if arm == "annealed" else None
+    sched = topk_softmax.TauScheduler(layer, TAU_START, TAU_END, STEPS) if arm == "annealed" else None
 
     for _ in range(STEPS):
         b = torch.randint(0, x.shape[0], (256,), generator=g)
@@ -64,7 +64,7 @@ def held_out_distance(seed, arm):
             sched.step()
 
     with torch.no_grad():
-        p = softk.soft_topk_softmax(body(x_held), K, 1.0, mode="hard")
+        p = topk_softmax.soft_topk_softmax(body(x_held), K, 1.0, mode="hard")
         return 0.5 * (p - target_held).abs().sum(-1).mean().item()
 
 
