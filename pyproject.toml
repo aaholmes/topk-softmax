@@ -1,0 +1,13 @@
+[project]
+name = "softk"
+version = "0.0.0"
+description = "Annealed soft top-k softmax for PyTorch"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.4"]
+
+[dependency-groups]
+dev = ["pytest>=8", "hypothesis>=6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: takes more than a few seconds (deselect with -m 'not slow')"]
