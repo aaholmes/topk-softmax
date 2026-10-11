@@ -63,24 +63,48 @@ p = soft_topk_softmax(z, k=3, tau=0.1)                # each row sums to 1; mass
 p = soft_topk_softmax(z, k=3, tau=0.1, mode="hard")   # exactly 3 nonzero entries per row
 ```
 
+In a model, the module `SoftTopKSoftmax` holds τ in a buffer, and `TauScheduler` lowers it during
+training:
+
+```python
+from softk import SoftTopKSoftmax, TauScheduler
+
+layer = SoftTopKSoftmax(k=3, track_stats=True)          # use in place of torch.nn.Softmax
+sched = TauScheduler(layer, tau_start=10.0, tau_end=0.3, total_steps=10_000)
+
+for batch in loader:
+    ...                        # forward pass through a model containing `layer`, backward, optimizer step
+    sched.step()               # holds tau_start for the first 5% of steps, then decays it to tau_end
+    layer.stats                # for logging, e.g. the mean probability outside the top 3
+
+layer.mode = "hard"            # exact zeros for inference
+```
+
 ## Status
 
-The core operator is implemented and tested on CPU. It is not yet released as a package.
+The operator and the training tools are implemented and tested on CPU. The package is not yet
+released.
 
 - `soft_topk_softmax` and `soft_topk_mask` work along any dimension, in 16-, 32- and 64-bit
   floating point, and compile with `torch.compile` without graph breaks.
 - Three modes are available: the soft formula above, an exact top-k mode for inference, and a
   straight-through mode that outputs the exact top-k result and uses the soft gradient.
-- The suite of 303 tests passes. It covers finite-difference gradient checks, agreement with an
+- `TauScheduler` supports three decay curves, an optional early stop once almost no probability
+  remains outside the top k, an optional final phase in straight-through mode, and saving and
+  resuming.
+- `softk.stats` has three quantities to log during training: the probability outside the top k, the
+  effective support exp(entropy), and how much the selected set changed between two checkpoints.
+- The suite of 431 tests passes. It covers finite-difference gradient checks, agreement with an
   independent double-precision reference, the softmax limit at large τ, the top-k limit at small τ,
-  and inputs with exact ties at the k-th position.
-- Not implemented yet: a scheduler that lowers τ during training, a module wrapper, and fused GPU
-  kernels. Nothing has been run on a GPU.
-- `demo.py` draws the figure above, plots the output for several inputs and values of k, and runs
-  a small training example on synthetic data.
+  inputs with exact ties at the k-th position, and the scheduler's curves and resume behavior.
+- Not implemented yet: fused GPU kernels. Nothing has been run on a GPU.
 
-There is no evidence yet that the operator improves a real model; it has only been checked for
-numerical correctness.
+One test trains a small network on a synthetic task whose targets are supported on the 4 largest
+of 64 teacher scores. On each of 10 random seeds, lowering τ from 10 to 0.3 during training ended
+closer to the target than using exact top-k from the first step. That comparison covers one
+synthetic task and does not separate lowering τ from simply training with a soft output.
+
+There is no evidence yet that the operator improves a real model.
 
 ## Running it
 
@@ -88,6 +112,7 @@ The environment is managed with the Python package manager `uv`.
 
 ```sh
 uv sync                  # installs softk in editable mode with its test dependencies
-uv run pytest            # about 30 seconds on CPU
-uv run python demo.py    # writes sweep.png, flow.png and train.png
+uv run pytest -m "not slow"                                     # about 10 seconds on CPU
+uv run pytest                                                   # about 75 seconds; adds compilation and training tests
+uv run python -m softk.demo --k 1 2 4 --input tie --out figs    # plots the output as a function of τ
 ```

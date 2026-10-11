@@ -46,9 +46,14 @@ def soft_topk_softmax(z, k, tau, dim=-1, mode="soft", iters=None):
 
     16-bit inputs are computed in 32-bit floating point and cast back.
     """
+    _validate(k, tau)
+    return _soft_topk_softmax(z, k, tau, dim, mode, iters)
+
+
+def _soft_topk_softmax(z, k, tau, dim, mode, iters=None):
+    """soft_topk_softmax without the check on tau, so tau may be a tensor under torch.compile."""
     if mode not in _MODES:
         raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
-    _validate(k, tau)
     if mode != "soft" and int(k) != k:
         raise ValueError(f"mode={mode!r} needs an integer k, got {k}")
     if k >= z.shape[dim]:
