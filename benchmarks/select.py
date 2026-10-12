@@ -32,7 +32,7 @@ before it is timed. One Triton program handles one row.
                   the pass counts the scores over the upper pivot and copies those between the
                   pivots to a buffer of C scores, where the rule finishes. The sample takes one
                   score at a pseudo-random position in each of S equal stretches of the row, and
-                  S and C are computed from n and k (`_oneread_sizes`). A row whose pivots miss,
+                  S and C are computed from n and k (`_oneread_sizes` in the library). A row whose pivots miss,
                   or whose buffer overflows, falls back to `current`, started from the interval
                   and counts the pass found (reported as the fraction of rows).
     oneread_even  `oneread` with the sample at an even stride
@@ -62,7 +62,8 @@ import torch
 import triton
 import triton.language as tl
 
-from topk_softmax._kernels import bit_midpoint
+from topk_softmax._kernels import bit_midpoint, kth_in_buffer as _kth_in_buffer, single_pass as _single_pass
+from topk_softmax._triton import _oneread_sizes
 
 NS = [64, 512, 4096, 32768, 262144, 2097152]
 MAX_BATCH = 4096
@@ -103,23 +104,6 @@ def _count_pass(z_ptr, base, n, trials, BLOCK: tl.constexpr, M: tl.constexpr):
         up = tl.minimum(up, tl.min(tl.where(over, zz, float("inf")), axis=0))
         down = tl.maximum(down, tl.max(tl.where(under, zz, float("-inf")), axis=0))
     return counts, up, down
-
-
-@triton.jit
-def _single_pass(ptr, off, m, mid, BLOCK: tl.constexpr):
-    """Over the m scores at ptr + off: how many exceed mid, the smallest that does, and the largest that does not."""
-    count = m * 0
-    next_up = float("inf")
-    next_down = float("-inf")
-    for start in range(0, m, BLOCK):
-        offs = start + tl.arange(0, BLOCK)
-        valid = offs < m
-        z = tl.load(ptr + off + offs, mask=valid, other=0.0)
-        over = valid & (z > mid)
-        count += tl.sum(over.to(tl.int32), axis=0)
-        next_up = tl.minimum(next_up, tl.min(tl.where(over, z, float("inf")), axis=0))
-        next_down = tl.maximum(next_down, tl.max(tl.where(valid & (z <= mid), z, float("-inf")), axis=0))
-    return count, next_up, next_down
 
 
 @triton.jit
@@ -244,28 +228,6 @@ def select_kernel(z_ptr, buf_ptr, c_ptr, passes_ptr, kf, n,
                 j = tl.where(below < above, j + 1, MAX_SELECT)
     tl.store(c_ptr + row, above)
     tl.store(passes_ptr + row, passes)
-
-
-@triton.jit
-def _kth_in_buffer(buf_ptr, off, m, need, below, above, CB: tl.constexpr, MAX_SELECT: tl.constexpr):
-    """The need-th largest of the m scores at buf_ptr + off, whose smallest and largest are below and above."""
-    over_below = m
-    over_above = m * 0
-    j = tl.where(below < above, m * 0, MAX_SELECT)
-    while j < MAX_SELECT:
-        frac = (over_below.to(tl.float32) - need + 0.5) / (over_below - over_above).to(tl.float32)
-        frac = tl.where(j % 2 == 0, frac, 0.5)
-        mid = below + frac * (above - below)
-        mid = tl.where((j % 2 == 1) & (j >= 24), bit_midpoint(below, above), mid)
-        mid = tl.where((mid >= above) | (mid < below), below, mid)
-        count, next_up, next_down = _single_pass(buf_ptr, off, m, mid, CB)
-        enough = count >= need
-        below = tl.where(enough, next_up, below)
-        above = tl.where(enough, above, next_down)
-        over_below = tl.where(enough, count, over_below)
-        over_above = tl.where(enough, over_above, count)
-        j = tl.where(below < above, j + 1, MAX_SELECT)
-    return above
 
 
 @triton.jit
@@ -464,25 +426,6 @@ def heap_kernel(z_ptr, heap_ptr, c_ptr, kf, n):
 
 def _pow2_floor(x):
     return triton.next_power_of_2(int(x) + 1) // 2
-
-
-def _oneread_sizes(n, k):
-    """Sample and buffer sizes for `oneread`.
-
-    The slice between the pivots holds about 6 n sqrt(p (1 - p) / S) scores for p = k/n, so the
-    sample S that balances its own cost with the slice's is about (3 n sqrt(p (1 - p)))^(2/3).
-    The buffer holds the expected slice plus four standard deviations.
-    """
-    p = k / n
-    sample = triton.next_power_of_2(int((3 * n * math.sqrt(max(p * (1 - p), 1 / n))) ** (2 / 3)))
-    sample = max(16, min(max(sample, 256), _pow2_floor(n // 4)))
-    r = k * sample / n
-    d = 3 * math.sqrt(max(r * (1 - r / sample), 0)) + 1  # as in the kernel
-    lowest = min(int(r + d) + 2, sample + 1)
-    highest = int(r - d - 1) + 1 if r - d - 1 >= 0 else 0
-    gaps = lowest - highest
-    cap = triton.next_power_of_2(int(n / sample * (gaps + 4 * math.sqrt(gaps) + 2)))
-    return sample, max(min(cap, triton.next_power_of_2(n)), sample)
 
 
 def _arm(name, z, kf, block, warps):

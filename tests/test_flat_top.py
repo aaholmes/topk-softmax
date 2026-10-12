@@ -423,3 +423,85 @@ def test_triton_finds_the_kth_score_for_wide_ranges():
             _, state = _triton._ops[0](z.cuda(), None, 1.0, float(k), k, 20, False)
             want = z.topk(k, -1).values[:, -1]
             assert torch.equal(state[:, 0].cpu(), want), f"{name}, k = {k}"
+
+
+# ---- long rows: from 32768 scores, or 8192 for small k, the kernel finds the k-th score during
+# its first pass ----
+
+LONG = [(4096, 64), (8192, 32), (16384, 32), (32768, 16), (65536, 8), (262144, 4), (2097152, 2)]
+
+
+def _long_families(rows, n):
+    z = torch.randn(rows, n, generator=torch.Generator().manual_seed(0))
+    spot = torch.arange(n)
+    return [("gaussian", z), ("ties", (z * 10).round() / 10), ("two values", (z > 1.0).float()),
+            ("constant", torch.ones(rows, n)), ("heavy tails", z ** 3), ("wide range", torch.exp(18 * z)),
+            ("sorted", z.sort(-1).values), ("descending", z.sort(-1, descending=True).values),
+            ("stride pattern", z + 3.0 * (spot % 64 == 0)), ("shifted halves", z + 3.0 * (spot >= n // 2))]
+
+
+def _kth_scores(z, k):
+    """The k-th largest score of each row as the forward kernel found it."""
+    from topk_softmax import _triton
+
+    assert _triton.available()
+    _, state = _triton._ops[0](z, None, 1.0, float(k), k, 20, False)
+    return state[:, 0]
+
+
+def _assert_kth_scores(rows, n):
+    for name, z in _long_families(rows, n):
+        z = z.cuda()
+        for k in sorted({100, 1000, n // 32, n // 8, n // 2}):
+            assert torch.equal(_kth_scores(z, k), z.topk(k, -1).values[:, -1]), f"{name}, n = {n}, k = {k}"
+
+
+@on_cuda
+@pytest.mark.slow
+@pytest.mark.parametrize("n,rows", LONG)
+def test_triton_finds_the_kth_score_in_long_rows(n, rows):
+    _assert_kth_scores(rows, n)
+
+
+@on_cuda
+@pytest.mark.slow
+@pytest.mark.parametrize("sizes", [(16, 16), (16, 256), (256, 16)])
+def test_triton_finds_the_kth_score_when_the_sample_or_buffer_is_too_small(sizes, monkeypatch):
+    # a tiny sample makes the pivots miss and a tiny buffer overflows, so rows take the fallback
+    from topk_softmax import _triton
+
+    monkeypatch.setattr(_triton, "_oneread_sizes", lambda n, k: sizes)
+    monkeypatch.setattr(_triton, "_forward_plan", lambda n, flat_k: (flat_k >= 1, 4096, 8))
+    _assert_kth_scores(64, 4096)
+    _assert_kth_scores(8, 32768)
+
+
+@on_cuda
+@pytest.mark.slow
+@pytest.mark.parametrize("n,rows", LONG)
+@pytest.mark.parametrize("tau", [1.0, 0.05])
+def test_triton_matches_eager_in_long_rows(n, rows, tau):
+    z = randn(rows, n, dtype=torch.float32).cuda()
+    for k in (100, n // 8):
+        assert_close(soft(z, k, tau, backend="triton").cpu(), soft(z, k, tau, backend="eager").cpu(), 1e-6)
+        m = mask(z, k, tau, backend="triton")
+        assert_close(m.cpu(), mask(z, k, tau, backend="eager").cpu(), 1e-5)
+        assert (m.double().sum(-1) - k).abs().max().item() <= mask_sum_tol(k, torch.float32), (n, k)
+        # Scores that tie at the k-th value share the routed gradient in the kernel and not in the
+        # PyTorch code, so those entries are compared by their sum per row.
+        tied = z == z.topk(k, -1).values[:, -1:]
+        triton, eager = _grad(z, k, tau, "triton"), _grad(z, k, tau, "eager")
+        assert_close(triton.masked_fill(tied, 0).cpu(), eager.masked_fill(tied, 0).cpu(), 1e-5)
+        assert_close((triton * tied).sum(-1).cpu(), (eager * tied).sum(-1).cpu(), 1e-5)
+
+
+@on_cuda
+@pytest.mark.slow
+def test_triton_long_rows_under_torch_compile():
+    torch._dynamo.reset()
+    z = randn(4, 32768, dtype=torch.float32).cuda()
+    fn = torch.compile(topk_softmax.soft_topk_softmax)
+    assert_close(fn(z, 512, 0.5, backend="triton").cpu(), soft(z, 512, 0.5, backend="eager").cpu(), 1e-6)
+    explanation = torch._dynamo.explain(topk_softmax.soft_topk_softmax)(z, 512, 0.5, backend="triton")
+    assert explanation.graph_break_count == 0, explanation.break_reasons
+    torch._dynamo.reset()

@@ -64,8 +64,6 @@ def flow(plt, out, k=3, flat_top=True):
     ax.set_xlim(taus[0], taus[-1])
     ax.set_xlabel("temperature τ (decreasing)")
     ax.set_ylabel(f"output probability (n = {n} scores)")
-    ax.text(0, 1.03, "large τ: softmax", transform=ax.transAxes, ha="left", va="bottom")
-    ax.text(1, 1.03, f"τ → 0: softmax over the {k} largest scores", transform=ax.transAxes, ha="right", va="bottom")
     ax.legend(frameon=False, loc="lower right", bbox_to_anchor=(1.0, 0.06))
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()

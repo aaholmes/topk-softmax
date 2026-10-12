@@ -48,15 +48,21 @@ def _arms(k, tau, flat_top=False):
     }
 
 
+CASES = [(1024, False), (1024, True), (16384, False), (16384, True), (262144, True)]
+
+
+def _batch(n):
+    return min(BATCH, 2**27 // n)  # at most 512 MB of scores
+
+
 def _assert_faster(times, speedup):
     best_existing = min(times["eager"], times["compiled"])
     assert times["triton"] * speedup <= best_existing, {name: f"{t:.3f} ms" for name, t in times.items()}
 
 
-@pytest.mark.parametrize("flat_top", [False, True])
-@pytest.mark.parametrize("n", [1024, 16384])
+@pytest.mark.parametrize("n,flat_top", CASES)
 def test_triton_forward_is_faster(n, flat_top):
-    z = randn(BATCH, n, dtype=torch.float32).cuda()
+    z = randn(_batch(n), n, dtype=torch.float32).cuda()
 
     def timed(fn):
         def call():
@@ -67,11 +73,10 @@ def test_triton_forward_is_faster(n, flat_top):
     _assert_faster({name: timed(fn) for name, fn in _arms(n // 8, 1.0, flat_top).items()}, FORWARD_SPEEDUP)
 
 
-@pytest.mark.parametrize("flat_top", [False, True])
-@pytest.mark.parametrize("n", [1024, 16384])
+@pytest.mark.parametrize("n,flat_top", CASES)
 def test_triton_forward_and_backward_are_faster(n, flat_top):
-    z = randn(BATCH, n, dtype=torch.float32).cuda()
-    w = randn(BATCH, n, dtype=torch.float32, seed=1).cuda()
+    z = randn(_batch(n), n, dtype=torch.float32).cuda()
+    w = randn(_batch(n), n, dtype=torch.float32, seed=1).cuda()
 
     def timed(fn):
         def call():

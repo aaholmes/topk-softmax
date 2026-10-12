@@ -47,10 +47,52 @@ def bit_midpoint(below, above):
 
 
 @triton.jit
-def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, kf, n, max_iters,
+def single_pass(ptr, off, m, mid, BLOCK: tl.constexpr):
+    """Over the m scores at ptr + off: how many exceed mid, the smallest that does, and the
+    largest that does not."""
+    count = m * 0
+    next_up = float("inf")
+    next_down = float("-inf")
+    for start in range(0, m, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        valid = offs < m
+        z = tl.load(ptr + off + offs, mask=valid, other=0.0)
+        over = valid & (z > mid)
+        count += tl.sum(over.to(tl.int32), axis=0)
+        next_up = tl.minimum(next_up, tl.min(tl.where(over, z, float("inf")), axis=0))
+        next_down = tl.maximum(next_down, tl.max(tl.where(valid & (z <= mid), z, float("-inf")), axis=0))
+    return count, next_up, next_down
+
+
+@triton.jit
+def kth_in_buffer(buf_ptr, off, m, need, below, above, CB: tl.constexpr, MAX_SELECT: tl.constexpr):
+    """The need-th largest of the m scores at buf_ptr + off, whose smallest and largest are
+    below and above. The trial values are chosen as in forward_kernel."""
+    over_below = m
+    over_above = m * 0
+    j = tl.where(below < above, m * 0, MAX_SELECT)
+    while j < MAX_SELECT:
+        frac = (over_below.to(tl.float32) - need + 0.5) / (over_below - over_above).to(tl.float32)
+        frac = tl.where(j % 2 == 0, frac, 0.5)
+        mid = below + frac * (above - below)
+        mid = tl.where((j % 2 == 1) & (j >= 24), bit_midpoint(below, above), mid)
+        mid = tl.where((mid >= above) | (mid < below), below, mid)
+        count, next_up, next_down = single_pass(buf_ptr, off, m, mid, CB)
+        enough = count >= need
+        below = tl.where(enough, next_up, below)
+        above = tl.where(enough, above, next_down)
+        over_below = tl.where(enough, count, over_below)
+        over_above = tl.where(enough, over_above, count)
+        j = tl.where(below < above, j + 1, MAX_SELECT)
+    return above
+
+
+@triton.jit
+def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, buf_ptr, tau_number, k, logit, kf, n, max_iters,
                    BLOCK: tl.constexpr, WANT_MASK: tl.constexpr, TAU_IS_TENSOR: tl.constexpr,
                    MAX_POLISH: tl.constexpr, WIDTH: tl.constexpr, FLOOR: tl.constexpr,
-                   FLAT: tl.constexpr, MAX_SELECT: tl.constexpr):
+                   FLAT: tl.constexpr, MAX_SELECT: tl.constexpr,
+                   S: tl.constexpr, SC: tl.constexpr, C: tl.constexpr, CB: tl.constexpr):
     row = tl.program_id(0)
     base = row.to(tl.int64) * n
     # scalar arguments arrive as 64-bit floats under torch.compile
@@ -61,10 +103,48 @@ def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, kf,
     else:
         tau_in = tl.cast(tau_number, tl.float32)
 
+    # For long rows (S > 0), c, the kf-th largest score, is found during the pass for the row
+    # statistics. S scores, one at a pseudo-random position in each of S equal stretches of the
+    # row, give two pivots: sample order statistics three standard deviations of the sample rank
+    # to either side of where c is expected. The pass counts the scores over the upper pivot and
+    # copies those between the pivots to a buffer of C scores, which then holds c.
+    buf = row.to(tl.int64) * C
+    low = float("-inf")
+    high = float("inf")
+    if S > 0:
+        stride = n // S
+        s_min = float("inf")
+        s_max = float("-inf")
+        for first in range(0, S, SC):
+            offs = first + tl.arange(0, SC)
+            # a hash of the sample index and the row picks the position inside each stretch
+            h = offs.to(tl.int64) * 2654435761 + row.to(tl.int64) * 40503 + 12345
+            h = (h ^ (h >> 15)) * 2246822519
+            h = (h ^ (h >> 13)) & 0x7FFFFFFF
+            part = tl.load(z_ptr + base + offs.to(tl.int64) * stride + h % stride)
+            tl.store(buf_ptr + buf + offs, part)
+            s_min = tl.minimum(s_min, tl.min(part, axis=0))
+            s_max = tl.maximum(s_max, tl.max(part, axis=0))
+        r = kf * (1.0 * S) / n  # expected number of sample scores over c
+        d = 3.0 * tl.sqrt(tl.maximum(r * (1.0 - r / S), 0.0)) + 1.0
+        size = row * 0 + S
+        low = low + s_min * 0.0
+        high = high + s_min * 0.0
+        if (r + d).to(tl.int32) + 2 <= S:
+            low = kth_in_buffer(buf_ptr, buf, size, (r + d).to(tl.int32) + 2, s_min, s_max, CB, MAX_SELECT)
+        if r - d - 1.0 >= 0.0:
+            high = kth_in_buffer(buf_ptr, buf, size, (r - d - 1.0).to(tl.int32) + 1, s_min, s_max, CB, MAX_SELECT)
+
     # row statistics
     total = 0.0
     z_min = float("inf")
     z_max = float("-inf")
+    over_high = row * 0       # scores over the upper pivot
+    filled = row * 0          # scores between the pivots
+    in_min = float("inf")     # the smallest and largest of those
+    in_max = float("-inf")
+    high_next = float("inf")  # the smallest score over the upper pivot
+    low_prev = float("-inf")  # the largest score at or under the lower pivot
     for start in range(0, n, BLOCK):
         offs = start + tl.arange(0, BLOCK)
         valid = offs < n
@@ -72,6 +152,16 @@ def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, kf,
         total += tl.sum(z, axis=0)
         z_min = tl.minimum(z_min, tl.min(tl.where(valid, z, float("inf")), axis=0))
         z_max = tl.maximum(z_max, tl.max(tl.where(valid, z, float("-inf")), axis=0))
+        if S > 0:
+            inside = valid & (z > low) & (z <= high)
+            spot = filled + tl.cumsum(inside.to(tl.int32), axis=0) - 1
+            tl.store(buf_ptr + buf + spot, z, mask=inside & (spot < C))
+            filled += tl.sum(inside.to(tl.int32), axis=0)
+            over_high += tl.sum((valid & (z > high)).to(tl.int32), axis=0)
+            in_min = tl.minimum(in_min, tl.min(tl.where(inside, z, float("inf")), axis=0))
+            in_max = tl.maximum(in_max, tl.max(tl.where(inside, z, float("-inf")), axis=0))
+            high_next = tl.minimum(high_next, tl.min(tl.where(valid & (z > high), z, float("inf")), axis=0))
+            low_prev = tl.maximum(low_prev, tl.max(tl.where(valid & (z <= low), z, float("-inf")), axis=0))
 
     if FLAT:
         # Find c, the kf-th largest score. below and above are scores of the row with
@@ -82,6 +172,19 @@ def forward_kernel(z_ptr, out_ptr, state_ptr, tau_ptr, tau_number, k, logit, kf,
         # count_below scores are >= below and count_above are > above; kf lies between them
         count_below = row * 0 + n
         count_above = row * 0
+        if S > 0:
+            between = (over_high < kf) & (kf <= over_high + filled)
+            if between & (filled <= C):
+                below = kth_in_buffer(buf_ptr, buf, filled, kf - over_high, in_min, in_max, CB, MAX_SELECT)
+                above = below
+            else:
+                # The buffer overflowed or the pivots missed. The loop below then starts from
+                # the part of the row that the pass showed to hold c.
+                higher = kf <= over_high
+                below = tl.where(between, in_min, tl.where(higher, high_next, z_min))
+                above = tl.where(between, in_max, tl.where(higher, z_max, low_prev))
+                count_below = tl.where(between, over_high + filled, tl.where(higher, over_high, count_below))
+                count_above = tl.where(between, over_high, tl.where(higher, count_above, over_high + filled))
         i = tl.where(below < above, row * 0, MAX_SELECT)
         while i < MAX_SELECT:
             # Trial value: on even passes, where a straight line through the two counts crosses
